@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
 import sys, os, signal, time, argparse
+import types
 
 from Qt import QtCore, QtGui, QtWidgets
+import numpy as np
 
 from qspectrumanalyzer import backends
 from qspectrumanalyzer.version import __version__
@@ -48,6 +50,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         # Link main spectrum plot to waterfall plot
         self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
+        self.install_shared_view_all_actions()
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -62,6 +65,64 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         self.update_buttons()
         self.load_settings()
+
+    def install_shared_view_all_actions(self):
+        """Make every View All path use one range for spectrum and waterfall"""
+        for plot in (self.spectrumPlotWidget.plot, self.waterfallPlotWidget.plot):
+            view = plot.getViewBox()
+            view.autoRange = types.MethodType(lambda view, *args, **kwargs: self.auto_range_plots(), view)
+            action = view.menu.viewAll
+            try:
+                action.triggered.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            action.triggered.connect(self.auto_range_plots)
+
+    @QtCore.Slot()
+    def auto_range_plots(self):
+        """Auto-range both plots together, regardless of which menu was used"""
+        spectrum_view = self.spectrumPlotWidget.plot.getViewBox()
+
+        def restore_x_link():
+            self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
+
+        spectrum_view.linkView(spectrum_view.XAxis, None)
+
+        try:
+            start_freq = float(self.startFreqSpinBox.value()) * 1e6
+            stop_freq = float(self.stopFreqSpinBox.value()) * 1e6
+            if start_freq > stop_freq:
+                start_freq, stop_freq = stop_freq, start_freq
+
+            if self.data_storage is None or self.data_storage.x is None:
+                self.waterfallPlotWidget.view_all(start_freq, stop_freq)
+                self.spectrumPlotWidget.plot.setXRange(start_freq, stop_freq, padding=0)
+                return
+
+            self.waterfallPlotWidget.view_all(start_freq, stop_freq)
+            self.spectrumPlotWidget.plot.setXRange(start_freq, stop_freq, padding=0)
+
+            y_parts = []
+            for y in (
+                    self.data_storage.y,
+                    self.data_storage.average,
+                    self.data_storage.peak_hold_max,
+                    self.data_storage.peak_hold_min,
+                    self.data_storage.baseline):
+                if y is None:
+                    continue
+                y = np.asarray(y)
+                y = y[np.isfinite(y)]
+                if y.size:
+                    y_parts.append(y)
+
+            if y_parts:
+                y = np.concatenate(y_parts)
+                self.spectrumPlotWidget.plot.setYRange(y.min(), y.max(), padding=0.05)
+
+            self.waterfallPlotWidget.view_all(start_freq, stop_freq)
+        finally:
+            restore_x_link()
 
     def setup_power_thread(self):
         """Create power_thread and connect signals to slots"""
@@ -200,8 +261,25 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         # Window geometry has to be restored only after show(), because initial
         # maximization doesn't work otherwise (at least not in some window managers on X11)
         self.show()
+        QtCore.QTimer.singleShot(0, self.ensure_plot_splitter_visible)
         if settings.value("window_geometry"):
             self.restoreGeometry(settings.value("window_geometry"))
+            QtCore.QTimer.singleShot(0, self.ensure_plot_splitter_visible)
+
+    def ensure_plot_splitter_visible(self):
+        """Prevent restored splitter state from hiding one of the plots"""
+        sizes = self.plotSplitter.sizes()
+        if not sizes or all(size > 0 for size in sizes):
+            return
+
+        height = self.plotSplitter.height()
+        if height <= 0:
+            height = sum(sizes)
+        if height <= 0:
+            height = 2
+
+        first_size = height // 2
+        self.plotSplitter.setSizes([first_size, height - first_size])
 
     def save_settings(self):
         """Save spectrum analyzer settings and window geometry"""
@@ -331,6 +409,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.spectrumPlotWidget.clear_persistence()
 
         self.data_storage.reset()
+        start_freq = float(self.startFreqSpinBox.value()) * 1e6
+        stop_freq = float(self.stopFreqSpinBox.value()) * 1e6
+        self.data_storage.set_frequency_range(start_freq, stop_freq)
+        self.waterfallPlotWidget.set_frequency_range(start_freq, stop_freq)
         self.data_storage.set_smooth(
             bool(self.smoothCheckBox.isChecked()),
             settings.value("smooth_length", 11, int),

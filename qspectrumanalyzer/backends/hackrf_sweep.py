@@ -106,7 +106,7 @@ class PowerThread(BasePowerThread):
             if additional_params:
                 cmdline.extend(shlex.split(additional_params))
 
-            print('Starting backend:')
+            print('Starting backend at ' + time.strftime("%Y-%m-%d %H:%M:%S"))
             print(' '.join(cmdline))
             print()
             self.process = subprocess.Popen(cmdline, stdout=subprocess.PIPE,
@@ -115,7 +115,7 @@ class PowerThread(BasePowerThread):
     def parse_output(self, buf):
         """Parse one buf of output from hackrf_sweep"""
         (low_edge, high_edge) = struct.unpack('QQ', buf[:16])
-        data = np.fromstring(buf[16:], dtype='<f4')
+        data = np.frombuffer(buf[16:], dtype='<f4')
         step = (high_edge - low_edge) / len(data)
 
         if (low_edge // 1000000) <= (self.params["start_freq"] - self.lnb_lo / 1e6):

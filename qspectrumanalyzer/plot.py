@@ -1,10 +1,29 @@
 import collections, math
 
-from Qt import QtCore
+from Qt import QtCore, QtGui
+import numpy as np
 import pyqtgraph as pg
 
 # Basic PyQtGraph settings
 pg.setConfigOptions(antialias=True)
+
+
+def set_curve_data(curve, x, y, name):
+    """Set curve data, trimming mismatched axes instead of dropping the plot"""
+    if x is None or y is None:
+        return
+
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if len(x) != len(y):
+        size = min(len(x), len(y))
+        print("{} plot data length mismatch: x={}, y={}; trimming to {}".format(
+            name, len(x), len(y), size
+        ))
+        x = x[:size]
+        y = y[:size]
+
+    curve.setData(x, y)
 
 
 class SpectrumPlotWidget:
@@ -136,7 +155,7 @@ class SpectrumPlotWidget:
             return
 
         if self.main_curve or force:
-            self.curve.setData(data_storage.x, data_storage.y)
+            set_curve_data(self.curve, data_storage.x, data_storage.y, "Main spectrum")
             if force:
                 self.curve.setVisible(self.main_curve)
 
@@ -146,7 +165,8 @@ class SpectrumPlotWidget:
             return
 
         if self.peak_hold_max or force:
-            self.curve_peak_hold_max.setData(data_storage.x, data_storage.peak_hold_max)
+            set_curve_data(self.curve_peak_hold_max, data_storage.x,
+                           data_storage.peak_hold_max, "Max. hold")
             if force:
                 self.curve_peak_hold_max.setVisible(self.peak_hold_max)
 
@@ -156,7 +176,8 @@ class SpectrumPlotWidget:
             return
 
         if self.peak_hold_min or force:
-            self.curve_peak_hold_min.setData(data_storage.x, data_storage.peak_hold_min)
+            set_curve_data(self.curve_peak_hold_min, data_storage.x,
+                           data_storage.peak_hold_min, "Min. hold")
             if force:
                 self.curve_peak_hold_min.setVisible(self.peak_hold_min)
 
@@ -166,7 +187,7 @@ class SpectrumPlotWidget:
             return
 
         if self.average or force:
-            self.curve_average.setData(data_storage.x, data_storage.average)
+            set_curve_data(self.curve_average, data_storage.x, data_storage.average, "Average")
             if force:
                 self.curve_average.setVisible(self.average)
 
@@ -177,7 +198,8 @@ class SpectrumPlotWidget:
             return
 
         if self.baseline or force:
-            self.curve_baseline.setData(data_storage.baseline_x, data_storage.baseline)
+            set_curve_data(self.curve_baseline, data_storage.baseline_x,
+                           data_storage.baseline, "Baseline")
             if force:
                 self.curve_baseline.setVisible(self.baseline)
 
@@ -192,7 +214,7 @@ class SpectrumPlotWidget:
             else:
                 for i, y in enumerate(self.persistence_data):
                     curve = self.persistence_curves[i]
-                    curve.setData(data_storage.x, y)
+                    set_curve_data(curve, data_storage.x, y, "Persistence")
                     if force:
                         curve.setVisible(self.persistence)
             self.persistence_data.appendleft(data_storage.y)
@@ -279,6 +301,9 @@ class WaterfallPlotWidget:
 
         self.history_size = 100
         self.counter = 0
+        self.visible_history_size = 0
+        self.frequency_start = None
+        self.frequency_stop = None
 
         self.create_plot()
 
@@ -288,8 +313,10 @@ class WaterfallPlotWidget:
         self.plot.setLabel("bottom", "Frequency", units="Hz")
         self.plot.setLabel("left", "Time")
 
-        self.plot.setYRange(-self.history_size, 0)
-        self.plot.setLimits(xMin=0, yMax=0)
+        self.lock_y_range()
+        self.plot.setLimits(xMin=0)
+        self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        self.plot.getViewBox().setMouseEnabled(y=False)
         self.plot.showButtons()
         #self.plot.setAspectLocked(True)
 
@@ -304,26 +331,61 @@ class WaterfallPlotWidget:
             #self.histogram.setHistogramRange(-50, 0)
             #self.histogram.setLevels(-50, 0)
 
+    def lock_y_range(self):
+        """Keep waterfall Y axis in history rows, never in power values."""
+        history_size = max(1, self.history_size)
+        self.plot.setLimits(
+            yMin=-history_size,
+            yMax=0,
+            minYRange=history_size,
+            maxYRange=history_size
+        )
+        self.plot.setYRange(-history_size, 0, padding=0)
+        self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+
+    def set_frequency_range(self, start_freq, stop_freq):
+        """Set configured waterfall frequency range in Hz."""
+        self.frequency_start = min(start_freq, stop_freq)
+        self.frequency_stop = max(start_freq, stop_freq)
+        self.plot.setXRange(self.frequency_start, self.frequency_stop, padding=0)
+
+    def get_frequency_rect(self, x, bins):
+        """Return image X placement using configured range when available."""
+        if self.frequency_start is not None and self.frequency_stop is not None:
+            return self.frequency_start, self.frequency_stop - self.frequency_start
+
+        if bins > 1:
+            bin_width = (x[-1] - x[0]) / (bins - 1)
+        else:
+            bin_width = 1
+        return x[0] - bin_width / 2, x[-1] - x[0] + bin_width
+
+    def set_image_transform(self, freq_start, freq_width, visible_size, bins=None):
+        """Place the waterfall image in plot coordinates without ImageItem.setRect."""
+        if not hasattr(self, "waterfallImg"):
+            return
+
+        if bins is None:
+            bins = self.waterfallImg.width()
+        if bins is None or bins <= 0 or visible_size <= 0 or freq_width <= 0:
+            return
+
+        transform = QtGui.QTransform()
+        transform.translate(freq_start, -visible_size)
+        transform.scale(freq_width / bins, 1)
+        self.waterfallImg.setTransform(transform)
+
     def update_plot(self, data_storage):
         """Update waterfall plot"""
         self.counter += 1
 
         # Create waterfall image on first run
         if self.counter == 1:
-            self.waterfallImg = pg.ImageItem()
-            self.waterfallImg.scale((data_storage.x[-1] - data_storage.x[0]) / len(data_storage.x), 1)
+            self.waterfallImg = pg.ImageItem(axisOrder="col-major")
             self.plot.clear()
             self.plot.addItem(self.waterfallImg)
 
-        # Roll down one and replace leading edge with new data
-        self.waterfallImg.setImage(data_storage.history.buffer[-self.counter:].T,
-                                   autoLevels=False, autoRange=False)
-
-        # Move waterfall image to always start at 0
-        self.waterfallImg.setPos(
-            data_storage.x[0],
-            -self.counter if self.counter < self.history_size else -self.history_size
-        )
+        self.set_image_data(data_storage)
 
         # Link histogram widget to waterfall image on first run
         # (must be done after first data is received or else levels would be wrong)
@@ -333,16 +395,56 @@ class WaterfallPlotWidget:
     def clear_plot(self):
         """Clear waterfall plot"""
         self.counter = 0
+        self.visible_history_size = 0
 
     def recalculate_plot(self, data_storage):
         """Recalculate waterfall plot"""
         if data_storage.x is None:
             return
 
-        self.waterfallImg.setImage(data_storage.history.buffer[-self.counter:].T,
-                                   autoLevels=False, autoRange=False)
-        self.waterfallImg.setPos(
-            data_storage.x[0],
-            -self.counter if self.counter < self.history_size else -self.history_size
-        )
-        self.histogram.setImageItem(self.waterfallImg)
+        if not hasattr(self, "waterfallImg"):
+            self.waterfallImg = pg.ImageItem(axisOrder="col-major")
+            self.plot.clear()
+            self.plot.addItem(self.waterfallImg)
+
+        self.set_image_data(data_storage)
+        if self.histogram_layout:
+            self.histogram.setImageItem(self.waterfallImg)
+
+    def set_image_data(self, data_storage):
+        """Update waterfall image data and geometry"""
+        if data_storage.x is None or data_storage.history is None:
+            return
+
+        history = data_storage.history.get_buffer()
+        if not len(history):
+            return
+
+        visible_size = min(len(history), self.history_size)
+        history = history[-visible_size:]
+        x = np.asarray(data_storage.x)
+        bins = min(history.shape[1], len(x))
+        if bins < 1:
+            return
+        if bins != history.shape[1] or bins != len(x):
+            print("Waterfall data length mismatch: x={}, y={}; trimming to {}".format(
+                len(x), history.shape[1], bins
+            ))
+            history = history[:, :bins]
+            x = x[:bins]
+
+        self.waterfallImg.setImage(history.T, autoLevels=False, autoRange=False)
+        freq_start, freq_width = self.get_frequency_rect(x, bins)
+
+        self.visible_history_size = visible_size
+        self.set_image_transform(freq_start, freq_width, visible_size, bins)
+        self.lock_y_range()
+
+    def view_all(self, start_freq, stop_freq):
+        """Show full configured waterfall frequency and history range"""
+        self.lock_y_range()
+        visible_size = max(1, self.visible_history_size)
+        if hasattr(self, "waterfallImg"):
+            self.set_image_transform(start_freq, stop_freq - start_freq, visible_size)
+        self.plot.setXRange(start_freq, stop_freq, padding=0)
+        self.lock_y_range()

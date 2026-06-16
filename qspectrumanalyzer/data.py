@@ -77,6 +77,9 @@ class DataStorage(QtCore.QObject):
         self.prev_baseline = None
         self.baseline = None
         self.baseline_x = None
+        self.frequency_start = None
+        self.frequency_stop = None
+        self.frequency_axis_warning_shown = False
 
         # Use only one worker thread because it is not faster
         # with more threads (and memory consumption is much higher)
@@ -110,8 +113,47 @@ class DataStorage(QtCore.QObject):
         """Wait for worker threads to complete all running tasks"""
         self.threadpool.waitForDone()
 
+    def set_frequency_range(self, start_freq, stop_freq):
+        """Set configured sweep range in Hz for validating backend x-axis data."""
+        self.frequency_start = min(start_freq, stop_freq)
+        self.frequency_stop = max(start_freq, stop_freq)
+        self.frequency_axis_warning_shown = False
+
+    def normalize_frequency_axis(self, data):
+        """Build x-axis bin centers from the configured sweep range."""
+        if self.frequency_start is None or self.frequency_stop is None:
+            return data
+
+        y = data.get("y")
+        x = data.get("x")
+        if x is None or y is None or len(x) != len(y) or len(x) < 2:
+            return data
+
+        x = np.asarray(x, dtype=float)
+        configured_span = self.frequency_stop - self.frequency_start
+        actual_span = x[-1] - x[0]
+        if configured_span <= 0:
+            return data
+
+        bin_width = configured_span / len(x)
+        data = data.copy()
+        data["x"] = np.linspace(
+            self.frequency_start + bin_width / 2,
+            self.frequency_stop - bin_width / 2,
+            len(x)
+        )
+        if not self.frequency_axis_warning_shown:
+            print("Frequency axis rebuilt from configured range: x span={} Hz, configured span={} Hz".format(
+                actual_span, configured_span
+            ))
+            self.frequency_axis_warning_shown = True
+
+        return data
+
     def update(self, data):
         """Update data storage"""
+        data = self.normalize_frequency_axis(data)
+
         if self.y is not None and len(data["y"]) != len(self.y):
             print("{:d} bins coming from backend, expected {:d}".format(len(data["y"]), len(self.y)))
             return
