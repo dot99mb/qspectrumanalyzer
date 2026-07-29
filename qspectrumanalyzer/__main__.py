@@ -370,8 +370,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
     def update_progress(self, value):
         """Update progress bar"""
-        value *= 1000
-        value_max = self.intervalSpinBox.value() * 1000
+        value = int(round(value * 1000))
+        value_max = int(round(self.intervalSpinBox.value() * 1000))
 
         if value_max < 1000:
             return
@@ -407,7 +407,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.start_timestamp = self.prev_data_timestamp
 
         if self.intervalSpinBox.value() >= 1:
-            self.progressbar.setRange(0, self.intervalSpinBox.value() * 1000)
+            self.progressbar.setRange(0, int(round(self.intervalSpinBox.value() * 1000)))
         else:
             self.progressbar.setRange(0, 0)
         self.update_progress(0)
