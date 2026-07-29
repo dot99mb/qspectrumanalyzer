@@ -197,7 +197,7 @@ class DataStorage(QtCore.QObject):
             self.average = data["y"].copy()
         else:
             self.average = np.average((self.average, data["y"]), axis=0, weights=(self.average_counter - 1, 1))
-            self.average_updated.emit(self)
+        self.average_updated.emit(self)
 
     def update_peak_hold_max(self, data):
         """Update max. peak hold data"""

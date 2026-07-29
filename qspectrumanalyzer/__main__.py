@@ -17,6 +17,7 @@ from qspectrumanalyzer.smoothing import QSpectrumAnalyzerSmoothing
 from qspectrumanalyzer.persistence import QSpectrumAnalyzerPersistence
 from qspectrumanalyzer.colors import QSpectrumAnalyzerColors
 from qspectrumanalyzer.baseline import QSpectrumAnalyzerBaseline
+from qspectrumanalyzer.peaks import PeakListWidget
 
 from qspectrumanalyzer.ui_qspectrumanalyzer import Ui_QSpectrumAnalyzerMainWindow
 
@@ -51,6 +52,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         # Link main spectrum plot to waterfall plot
         self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
         self.install_shared_view_all_actions()
+        self.create_peaks_dock()
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -61,10 +63,35 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.data_storage = None
         self.power_thread = None
         self.backend = None
+        self.peak_update_dirty = False
         self.setup_power_thread()
 
         self.update_buttons()
         self.load_settings()
+
+    def create_peaks_dock(self):
+        """Create dock listing average spectrum peak frequencies."""
+        self.peaksDockWidget = QtWidgets.QDockWidget(self.tr("Peaks"), self)
+        self.peaksDockWidget.setObjectName("peaksDockWidget")
+        self.peaksDockWidget.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetFloatable |
+            QtWidgets.QDockWidget.DockWidgetMovable
+        )
+
+        self.peakListWidget = PeakListWidget(self.peaksDockWidget)
+        self.peakListWidget.refresh_requested.connect(self.refresh_peak_frequencies)
+        self.peakListWidget.auto_refresh_toggled.connect(self.set_peak_auto_refresh)
+        self.peakListWidget.refresh_interval_changed.connect(self.set_peak_refresh_interval)
+        self.peakListWidget.source_changed.connect(self.set_peak_source)
+        self.peakListWidget.min_power_changed.connect(self.set_peak_min_power)
+        self.peakListWidget.band_floor_changed.connect(self.set_peak_band_floor)
+        self.peakListWidget.bands_toggled.connect(self.set_peak_bands_enabled)
+        self.peaksDockWidget.setWidget(self.peakListWidget)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.peaksDockWidget)
+
+        self.peak_update_timer = QtCore.QTimer(self)
+        self.peak_update_timer.timeout.connect(self.refresh_peak_frequencies_if_dirty)
+        self.set_peak_refresh_interval(self.peakListWidget.refreshIntervalSpinBox.value())
 
     def install_shared_view_all_actions(self):
         """Make every View All path use one range for spectrum and waterfall"""
@@ -139,8 +166,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.data_storage.history_updated.connect(self.waterfallPlotWidget.update_plot)
         self.data_storage.history_recalculated.connect(self.waterfallPlotWidget.recalculate_plot)
         self.data_storage.average_updated.connect(self.spectrumPlotWidget.update_average)
+        self.data_storage.average_updated.connect(self.mark_peak_frequencies_dirty)
         self.data_storage.baseline_updated.connect(self.spectrumPlotWidget.update_baseline)
         self.data_storage.peak_hold_max_updated.connect(self.spectrumPlotWidget.update_peak_hold_max)
+        self.data_storage.peak_hold_max_updated.connect(self.mark_peak_frequencies_dirty)
         self.data_storage.peak_hold_min_updated.connect(self.spectrumPlotWidget.update_peak_hold_min)
 
         # Setup default values and limits in case that backend is changed
@@ -407,6 +436,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.spectrumPlotWidget.clear_average()
         self.spectrumPlotWidget.clear_baseline()
         self.spectrumPlotWidget.clear_persistence()
+        self.peakListWidget.clear()
+        self.peak_update_dirty = False
 
         self.data_storage.reset()
         start_freq = float(self.startFreqSpinBox.value()) * 1e6
@@ -470,6 +501,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         if self.spectrumPlotWidget.curve_peak_hold_max.xData is None:
             self.spectrumPlotWidget.update_peak_hold_max(self.data_storage)
         self.spectrumPlotWidget.curve_peak_hold_max.setVisible(checked)
+        if checked:
+            self.mark_peak_frequencies_dirty(self.data_storage)
+            if not self.peak_update_timer.isActive():
+                self.refresh_peak_frequencies()
 
     @QtCore.Slot(bool)
     def on_peakHoldMinCheckBox_toggled(self, checked):
@@ -484,6 +519,83 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         if self.spectrumPlotWidget.curve_average.xData is None:
             self.spectrumPlotWidget.update_average(self.data_storage)
         self.spectrumPlotWidget.curve_average.setVisible(checked)
+        if checked:
+            self.mark_peak_frequencies_dirty(self.data_storage)
+            if not self.peak_update_timer.isActive():
+                self.refresh_peak_frequencies()
+        else:
+            self.peak_update_dirty = False
+            self.peakListWidget.clear()
+
+    @QtCore.Slot(object)
+    def mark_peak_frequencies_dirty(self, data_storage):
+        """Remember that average peak data changed without updating the table."""
+        self.peak_update_dirty = True
+
+    @QtCore.Slot()
+    def refresh_peak_frequencies_if_dirty(self):
+        """Refresh peak list from timer only when average data changed."""
+        if self.peak_update_dirty:
+            self.refresh_peak_frequencies()
+
+    @QtCore.Slot()
+    def refresh_peak_frequencies(self):
+        """Update peak list from average data when requested."""
+        if self.data_storage is None:
+            return
+
+        source = self.peakListWidget.sourceComboBox.currentData()
+        if source == "peak_hold_max":
+            y = self.data_storage.peak_hold_max
+        else:
+            y = self.data_storage.average
+
+        self.peakListWidget.update_peaks(self.data_storage.x, y)
+        self.peak_update_dirty = False
+
+    @QtCore.Slot(str)
+    def set_peak_source(self, source):
+        """Switch peak list data source."""
+        self.mark_peak_frequencies_dirty(self.data_storage)
+        if not self.peak_update_timer.isActive():
+            self.refresh_peak_frequencies()
+
+    @QtCore.Slot(float)
+    def set_peak_min_power(self, min_power):
+        """Apply peak minimum power filter."""
+        self.mark_peak_frequencies_dirty(self.data_storage)
+        if not self.peak_update_timer.isActive():
+            self.refresh_peak_frequencies()
+
+    @QtCore.Slot(float)
+    def set_peak_band_floor(self, band_floor):
+        """Apply signal-band merge floor."""
+        self.mark_peak_frequencies_dirty(self.data_storage)
+        if not self.peak_update_timer.isActive():
+            self.refresh_peak_frequencies()
+
+    @QtCore.Slot(bool)
+    def set_peak_bands_enabled(self, enabled):
+        """Toggle grouped signal-band peak display."""
+        self.mark_peak_frequencies_dirty(self.data_storage)
+        if not self.peak_update_timer.isActive():
+            self.refresh_peak_frequencies()
+
+    @QtCore.Slot(bool)
+    def set_peak_auto_refresh(self, enabled):
+        """Toggle periodic peak list updates."""
+        if enabled:
+            self.peak_update_timer.start()
+            self.refresh_peak_frequencies_if_dirty()
+        else:
+            self.peak_update_timer.stop()
+
+    @QtCore.Slot(float)
+    def set_peak_refresh_interval(self, seconds):
+        """Set peak list refresh interval in seconds."""
+        self.peak_update_timer.setInterval(max(100, int(seconds * 1000)))
+        if self.peak_update_timer.isActive():
+            self.peak_update_timer.start()
 
     @QtCore.Slot(bool)
     def on_persistenceCheckBox_toggled(self, checked):
