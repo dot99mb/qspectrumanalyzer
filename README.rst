@@ -4,6 +4,12 @@ QSpectrumAnalyzer
 Spectrum analyzer for multiple SDR platforms (PyQtGraph based GUI for soapy_power,
 hackrf_sweep, rtl_power, rx_power and other backends)
 
+Documentation
+-------------
+
+- `Установка в Ubuntu 26.04: HackRF, RTL-SDR и PlutoSDR
+  <docs/INSTALL_UBUNTU_26_RU.md>`_
+
 Screenshots
 -----------
 

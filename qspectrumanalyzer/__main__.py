@@ -53,6 +53,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
         self.install_shared_view_all_actions()
         self.create_peaks_dock()
+        self.create_view_menu()
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -92,6 +93,35 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.peak_update_timer = QtCore.QTimer(self)
         self.peak_update_timer.timeout.connect(self.refresh_peak_frequencies_if_dirty)
         self.set_peak_refresh_interval(self.peakListWidget.refreshIntervalSpinBox.value())
+
+    def create_view_menu(self):
+        """Create actions for closing and reopening dock panels."""
+        self.menu_View = QtWidgets.QMenu(self.tr("&View"), self.menubar)
+        self.menu_View.setObjectName("menu_View")
+        self.menubar.insertMenu(self.menu_Help.menuAction(), self.menu_View)
+
+        self.dock_widgets = (
+            self.controlsDockWidget,
+            self.frequencyDockWidget,
+            self.settingsDockWidget,
+            self.levelsDockWidget,
+            self.peaksDockWidget,
+        )
+        for dock in self.dock_widgets:
+            dock.setFeatures(dock.features() | QtWidgets.QDockWidget.DockWidgetClosable)
+            action = dock.toggleViewAction()
+            action.setText(dock.windowTitle())
+            self.menu_View.addAction(action)
+
+        self.menu_View.addSeparator()
+        self.actionShowAllPanels = self.menu_View.addAction(self.tr("Show All Panels"))
+        self.actionShowAllPanels.triggered.connect(self.show_all_dock_panels)
+
+    @QtCore.Slot()
+    def show_all_dock_panels(self):
+        """Show every dock panel after one or more of them were closed."""
+        for dock in self.dock_widgets:
+            dock.show()
 
     def install_shared_view_all_actions(self):
         """Make every View All path use one range for spectrum and waterfall"""
