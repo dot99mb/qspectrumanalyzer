@@ -1,10 +1,11 @@
 import os, sys, shlex, signal
 
 import numpy as np
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 
 from qspectrumanalyzer import subprocess
 from qspectrumanalyzer.backends import BaseInfo, BasePowerThread
+from qspectrumanalyzer.utils import split_executable
 
 try:
     from soapypower.writer import SoapyPowerBinFormat
@@ -32,7 +33,7 @@ class Info(BaseInfo):
 
     @classmethod
     def help_device(cls, executable, device):
-        cmdline = shlex.split(executable)
+        cmdline = split_executable(executable)
         try:
             text = subprocess.check_output(cmdline + ['--detect'], universal_newlines=True,
                                            stderr=subprocess.DEVNULL, env=dict(os.environ, COLUMNS='125'),
@@ -89,7 +90,7 @@ class PowerThread(BasePowerThread):
 
             # Prepare soapy_power cmdline parameters
             settings = QtCore.QSettings()
-            cmdline = shlex.split(settings.value("executable", "soapy_power"))
+            cmdline = split_executable(settings.value("executable", "soapy_power"))
             cmdline.extend([
                 "-f", "{}M:{}M".format(self.params["start_freq"],
                                        self.params["stop_freq"]),

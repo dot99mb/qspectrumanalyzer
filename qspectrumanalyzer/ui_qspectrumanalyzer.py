@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerMainWindow(object):
     def setupUi(self, QSpectrumAnalyzerMainWindow):
@@ -265,11 +265,11 @@ class Ui_QSpectrumAnalyzerMainWindow(object):
         self.verticalLayout_6.addWidget(self.histogramPlotLayout)
         self.levelsDockWidget.setWidget(self.levelsDockWidgetContents)
         QSpectrumAnalyzerMainWindow.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.levelsDockWidget)
-        self.action_Settings = QtWidgets.QAction(QSpectrumAnalyzerMainWindow)
+        self.action_Settings = QtGui.QAction(QSpectrumAnalyzerMainWindow)
         self.action_Settings.setObjectName("action_Settings")
-        self.action_Quit = QtWidgets.QAction(QSpectrumAnalyzerMainWindow)
+        self.action_Quit = QtGui.QAction(QSpectrumAnalyzerMainWindow)
         self.action_Quit.setObjectName("action_Quit")
-        self.action_About = QtWidgets.QAction(QSpectrumAnalyzerMainWindow)
+        self.action_About = QtGui.QAction(QSpectrumAnalyzerMainWindow)
         self.action_About.setObjectName("action_About")
         self.menu_File.addAction(self.action_Settings)
         self.menu_File.addSeparator()

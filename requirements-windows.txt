@@ -1,0 +1,5 @@
+# Runtime used by the Windows 11 desktop build.
+PySide6>=6.8,<7
+pyqtgraph>=0.13.7,<1
+numpy>=1.26,<3
+soapy_power>=1.6.1

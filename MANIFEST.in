@@ -1,5 +1,8 @@
 include LICENSE
 include README.rst
 include docs/INSTALL_UBUNTU_26_RU.md
+include docs/WINDOWS_11_RU.md
+include docs/ANALYSIS_RU.md
+include requirements-windows.txt
 include qspectrumanalyzer.desktop
 include qspectrumanalyzer.png

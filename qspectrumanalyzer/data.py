@@ -1,6 +1,6 @@
 import time, sys, os
 
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 import numpy as np
 
 from qspectrumanalyzer.utils import smooth

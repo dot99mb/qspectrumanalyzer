@@ -1,15 +1,19 @@
 import shlex
 
 import numpy as np
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 
 from qspectrumanalyzer import subprocess
 from qspectrumanalyzer.backends import BaseInfo, BasePowerThread
+from qspectrumanalyzer.utils import split_executable
 
 
 class Info(BaseInfo):
     """rtl_power device metadata"""
-    pass
+    sample_rate_min = 0
+    sample_rate_max = 0
+    sample_rate = 0
+    crop = 20
 
 
 class PowerThread(BasePowerThread):
@@ -40,7 +44,7 @@ class PowerThread(BasePowerThread):
         """Start rtl_power process"""
         if not self.process and self.params:
             settings = QtCore.QSettings()
-            cmdline = shlex.split(settings.value("executable", "rtl_power"))
+            cmdline = split_executable(settings.value("executable", "rtl_power"))
             cmdline.extend([
                 "-f", "{}M:{}M:{}k".format(self.params["start_freq"] - self.lnb_lo / 1e6,
                                            self.params["stop_freq"] - self.lnb_lo / 1e6,
@@ -51,8 +55,6 @@ class PowerThread(BasePowerThread):
                 "-c", "{}".format(self.params["crop"])
             ])
 
-            if self.params["sample_rate"] > 0:
-                cmdline.extend(["-r", "{}M".format(self.params["sample_rate"] / 1e6)])
             if self.params["gain"] >= 0:
                 cmdline.extend(["-g", "{}".format(self.params["gain"])])
             if self.params["single_shot"]:
@@ -65,29 +67,31 @@ class PowerThread(BasePowerThread):
             print('Starting backend:')
             print(' '.join(cmdline))
             print()
-            self.process = subprocess.Popen(cmdline, stdout=subprocess.PIPE,
+            self.process = subprocess.Popen(cmdline, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                             universal_newlines=True, console=False)
 
     def parse_output(self, line):
         """Parse one line of output from rtl_power"""
+        if line.count(",") < 6:
+            self.record_backend_message(line)
+            return
         line = [col.strip() for col in line.split(",")]
-        timestamp = " ".join(line[:2])
-        start_freq = int(line[2])
-        stop_freq = int(line[3])
-        step = float(line[4])
-        samples = float(line[5])
+        try:
+            timestamp = " ".join(line[:2])
+            start_freq = int(line[2])
+            stop_freq = int(line[3])
+            step = float(line[4])
+            samples = float(line[5])
+        except (ValueError, IndexError) as error:
+            self.record_backend_message("Invalid rtl_power output: {} ({})".format(line, error))
+            return
 
-        x_axis = list(np.linspace(start_freq + self.lnb_lo, stop_freq + self.lnb_lo,
-                                  round((stop_freq - start_freq) / step)))
         y_axis = [float(y) for y in line[6:]]
-        if len(x_axis) != len(y_axis):
-            print("ERROR: len(x_axis) != len(y_axis), use newer version of rtl_power!")
-            if len(x_axis) > len(y_axis):
-                print("Trimming x_axis...")
-                x_axis = x_axis[:len(y_axis)]
-            else:
-                print("Trimming y_axis...")
-                y_axis = y_axis[:len(x_axis)]
+        # rtl_power variants disagree on whether the header bounds describe
+        # edges or centers. The number of power values is authoritative; the
+        # full sweep axis is normalized to the configured range by DataStorage.
+        x_axis = list(np.linspace(start_freq + self.lnb_lo, stop_freq + self.lnb_lo,
+                                  len(y_axis)))
 
         if timestamp != self.last_timestamp:
             self.last_timestamp = timestamp

@@ -1,5 +1,5 @@
 import numpy as np
-from Qt import QtCore, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtWidgets
 
 
 class NumericTableWidgetItem(QtWidgets.QTableWidgetItem):

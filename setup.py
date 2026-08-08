@@ -39,7 +39,7 @@ setup(
     version=__version__,
     description=("Spectrum analyzer for multiple SDR platforms "
                  "(PyQtGraph based GUI for soapy_power, hackrf_sweep, rtl_power, rx_power and other backends)"),
-    long_description=open('README.rst').read(),
+    long_description=open('README.rst', encoding='utf-8').read(),
     author="Michal Krenek (Mikos)",
     author_email="m.krenek@gmail.com",
     url="https://github.com/xmikos/qspectrumanalyzer",
@@ -59,9 +59,10 @@ setup(
     ],
     install_requires=[
         "soapy_power>=1.6.0",
-        "pyqtgraph>=0.10.0",
-        "Qt.py",
+        "pyqtgraph>=0.13.7",
+        "PySide6>=6.8,<7",
     ],
+    python_requires=">=3.10",
     options={
         'build_qt': {
             'packages': ['qspectrumanalyzer'],

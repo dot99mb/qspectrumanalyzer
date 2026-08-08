@@ -7,6 +7,11 @@ hackrf_sweep, rtl_power, rx_power and other backends)
 Documentation
 -------------
 
+- `Windows 11: запуск, драйверы и сборка EXE
+  <docs/WINDOWS_11_RU.md>`_
+- `Анализ функций и план улучшений
+  <docs/ANALYSIS_RU.md>`_
+
 - `Установка в Ubuntu 26.04: HackRF, RTL-SDR и PlutoSDR
   <docs/INSTALL_UBUNTU_26_RU.md>`_
 

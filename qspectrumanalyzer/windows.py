@@ -40,9 +40,11 @@ def is_attached_console_visible():
 
 
 def set_windows_appusermodelid():
-    """Make sure correct icon is used on Windows 7 taskbar"""
+    """Make sure the correct icon and grouping are used on the taskbar."""
     try:
-        return windll.shell32.SetCurrentProcessExplicitAppUserModelID("spyder.Spyder")
+        return windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "QSpectrumAnalyzer.Desktop"
+        )
     except AttributeError:
         return "SetCurrentProcessExplicitAppUserModelID not found"
 

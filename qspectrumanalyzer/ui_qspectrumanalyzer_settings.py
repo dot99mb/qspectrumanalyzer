@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerSettings(object):
     def setupUi(self, QSpectrumAnalyzerSettings):
@@ -168,4 +168,3 @@ class Ui_QSpectrumAnalyzerSettings(object):
         self.bandwidthSpinBox.setSuffix(_translate("QSpectrumAnalyzerSettings", " MHz"))
         self.lnbSpinBox.setToolTip(_translate("QSpectrumAnalyzerSettings", "Negative frequency for upconverters, positive frequency for downconverters."))
         self.lnbSpinBox.setSuffix(_translate("QSpectrumAnalyzerSettings", " MHz"))
-

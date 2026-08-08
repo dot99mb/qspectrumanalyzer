@@ -1,9 +1,10 @@
 import math, shlex
 
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 
 from qspectrumanalyzer import subprocess
 from qspectrumanalyzer.backends import BaseInfo, BasePowerThread
+from qspectrumanalyzer.utils import split_executable
 
 
 class Info(BaseInfo):
@@ -64,7 +65,7 @@ class PowerThread(BasePowerThread):
         """Start rtl_power_fftw process"""
         if not self.process and self.params:
             settings = QtCore.QSettings()
-            cmdline = shlex.split(settings.value("executable", "rtl_power_fftw"))
+            cmdline = split_executable(settings.value("executable", "rtl_power_fftw"))
             cmdline.extend([
                 "-f", "{}M:{}M".format(self.params["start_freq"] - self.lnb_lo / 1e6,
                                        self.params["stop_freq"] - self.lnb_lo / 1e6),

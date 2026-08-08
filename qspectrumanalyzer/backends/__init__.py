@@ -1,8 +1,9 @@
 import os, threading, shlex
 
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 
 from qspectrumanalyzer import subprocess
+from qspectrumanalyzer.utils import split_executable
 
 
 class BaseInfo:
@@ -39,7 +40,7 @@ class BaseInfo:
 
     @classmethod
     def help_params(cls, executable):
-        cmdline = shlex.split(executable)
+        cmdline = split_executable(executable)
         try:
             text = subprocess.check_output(cmdline + ['-h'], universal_newlines=True,
                                            stderr=subprocess.STDOUT, env=dict(os.environ, COLUMNS='125'),
@@ -55,6 +56,7 @@ class BasePowerThread(QtCore.QThread):
     """Thread which runs Power Spectral Density acquisition and calculation process"""
     powerThreadStarted = QtCore.Signal()
     powerThreadStopped = QtCore.Signal()
+    powerThreadError = QtCore.Signal(str)
 
     def __init__(self, data_storage, parent=None):
         super().__init__(parent)
@@ -62,12 +64,26 @@ class BasePowerThread(QtCore.QThread):
         self.alive = False
         self.process = None
         self._shutdown_lock = threading.Lock()
+        self._stop_requested = False
+        self.backend_messages = []
 
     def stop(self):
         """Stop power process thread"""
-        self.process_stop()
+        self._stop_requested = True
         self.alive = False
+        self.process_stop()
         self.wait()
+
+    def record_backend_message(self, message):
+        """Keep recent backend diagnostics for a useful GUI error message."""
+        if isinstance(message, bytes):
+            message = message.decode(errors="replace")
+        message = str(message).strip()
+        if not message:
+            return
+        print(message)
+        self.backend_messages.append(message)
+        del self.backend_messages[:-20]
 
     def setup(self, start_freq, stop_freq, bin_size, interval=10.0, gain=-1, ppm=0, crop=0,
               single_shot=False, device=0, sample_rate=2560000, bandwidth=0, lnb_lo=0):
@@ -96,18 +112,39 @@ class BasePowerThread(QtCore.QThread):
 
     def run(self):
         """Power process thread main loop"""
-        self.process_start()
-        self.alive = True
-        self.powerThreadStarted.emit()
+        self._stop_requested = False
+        self.backend_messages = []
+        returncode = None
+        try:
+            self.process_start()
+            if self.process is None:
+                raise RuntimeError("Backend process did not start")
+            self.alive = True
+            self.powerThreadStarted.emit()
 
-        for line in self.process.stdout:
-            if not self.alive:
-                break
-            self.parse_output(line)
+            for line in self.process.stdout:
+                if not self.alive:
+                    break
+                self.parse_output(line)
 
-        self.process_stop()
-        self.alive = False
-        self.powerThreadStopped.emit()
+            if self.process is not None:
+                returncode = self.process.poll()
+                if returncode is None:
+                    returncode = self.process.wait()
+        except Exception as error:
+            self.record_backend_message(error)
+            if not self._stop_requested:
+                self.powerThreadError.emit("\n".join(self.backend_messages))
+        finally:
+            self.process_stop()
+            self.alive = False
+            if returncode not in (None, 0) and not self._stop_requested:
+                details = "\n".join(self.backend_messages)
+                message = "Backend exited with code {}".format(returncode)
+                if details:
+                    message += "\n\n" + details
+                self.powerThreadError.emit(message)
+            self.powerThreadStopped.emit()
 
 
 # Build list of all backends

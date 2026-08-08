@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerBaseline(object):
     def setupUi(self, QSpectrumAnalyzerBaseline):
@@ -50,4 +50,3 @@ class Ui_QSpectrumAnalyzerBaseline(object):
         QSpectrumAnalyzerBaseline.setWindowTitle(_translate("QSpectrumAnalyzerBaseline", "Baseline - QSpectrumAnalyzer"))
         self.label.setText(_translate("QSpectrumAnalyzerBaseline", "Baseline &file:"))
         self.baselineFileButton.setText(_translate("QSpectrumAnalyzerBaseline", "..."))
-

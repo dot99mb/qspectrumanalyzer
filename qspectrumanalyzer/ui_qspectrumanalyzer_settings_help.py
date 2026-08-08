@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerSettingsHelp(object):
     def setupUi(self, QSpectrumAnalyzerSettingsHelp):
@@ -34,4 +34,3 @@ class Ui_QSpectrumAnalyzerSettingsHelp(object):
     def retranslateUi(self, QSpectrumAnalyzerSettingsHelp):
         _translate = QtCore.QCoreApplication.translate
         QSpectrumAnalyzerSettingsHelp.setWindowTitle(_translate("QSpectrumAnalyzerSettingsHelp", "Help - QSpectrumAnalyzer"))
-

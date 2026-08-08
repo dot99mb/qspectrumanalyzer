@@ -1,6 +1,6 @@
 import collections, math
 
-from Qt import QtCore, QtGui
+from qspectrumanalyzer.qt import QtCore, QtGui
 import numpy as np
 import pyqtgraph as pg
 

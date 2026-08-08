@@ -1,0 +1,5 @@
+Скопируйте сюда rtl_power.exe и необходимые DLL из одного комплекта RTL-SDR.
+
+После этого откройте File -> Settings -> RTL-SDR preset -> Test backend.
+Для USB-интерфейса RTL-SDR должен быть установлен драйвер WinUSB.
+

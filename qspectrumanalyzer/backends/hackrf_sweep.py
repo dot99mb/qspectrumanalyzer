@@ -1,10 +1,11 @@
 import struct, shlex, sys, time
 
 import numpy as np
-from Qt import QtCore
+from qspectrumanalyzer.qt import QtCore
 
 from qspectrumanalyzer import subprocess
 from qspectrumanalyzer.backends import BaseInfo, BasePowerThread
+from qspectrumanalyzer.utils import split_executable
 
 
 class Info(BaseInfo):
@@ -85,7 +86,7 @@ class PowerThread(BasePowerThread):
         """Start hackrf_sweep process"""
         if not self.process and self.params:
             settings = QtCore.QSettings()
-            cmdline = shlex.split(settings.value("executable", "hackrf_sweep"))
+            cmdline = split_executable(settings.value("executable", "hackrf_sweep"))
             cmdline.extend([
                 "-f", "{}:{}".format(int(self.params["start_freq"] - self.lnb_lo / 1e6),
                                      int(self.params["stop_freq"] - self.lnb_lo / 1e6)),

@@ -1,4 +1,4 @@
-from Qt import QtCore, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtWidgets
 
 from qspectrumanalyzer.ui_qspectrumanalyzer_smoothing import Ui_QSpectrumAnalyzerSmoothing
 

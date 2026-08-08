@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerColors(object):
     def setupUi(self, QSpectrumAnalyzerColors):

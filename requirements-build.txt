@@ -1,0 +1,4 @@
+-r requirements-windows.txt
+PyInstaller>=6.11,<7
+pytest>=8,<10
+

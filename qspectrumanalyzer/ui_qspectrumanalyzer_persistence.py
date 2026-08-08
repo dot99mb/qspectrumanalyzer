@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerPersistence(object):
     def setupUi(self, QSpectrumAnalyzerPersistence):
@@ -57,4 +57,3 @@ class Ui_QSpectrumAnalyzerPersistence(object):
         self.decayFunctionComboBox.setItemText(0, _translate("QSpectrumAnalyzerPersistence", "linear"))
         self.decayFunctionComboBox.setItemText(1, _translate("QSpectrumAnalyzerPersistence", "exponential"))
         self.label.setText(_translate("QSpectrumAnalyzerPersistence", "Persistence length:"))
-

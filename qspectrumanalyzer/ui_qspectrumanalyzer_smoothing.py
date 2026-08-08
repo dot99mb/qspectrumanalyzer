@@ -6,7 +6,7 @@
 #
 # WARNING! All changes made in this file will be lost!
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 
 class Ui_QSpectrumAnalyzerSmoothing(object):
     def setupUi(self, QSpectrumAnalyzerSmoothing):
@@ -65,4 +65,3 @@ class Ui_QSpectrumAnalyzerSmoothing(object):
         self.windowFunctionComboBox.setItemText(3, _translate("QSpectrumAnalyzerSmoothing", "bartlett"))
         self.windowFunctionComboBox.setItemText(4, _translate("QSpectrumAnalyzerSmoothing", "blackman"))
         self.label_2.setText(_translate("QSpectrumAnalyzerSmoothing", "Window len&gth:"))
-

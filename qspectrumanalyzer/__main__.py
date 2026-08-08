@@ -3,16 +3,26 @@
 import sys, os, signal, time, argparse
 import types
 
-from Qt import QtCore, QtGui, QtWidgets
+from qspectrumanalyzer.qt import QtCore, QtGui, QtWidgets
 import numpy as np
 
 from qspectrumanalyzer import backends
 from qspectrumanalyzer.version import __version__
 from qspectrumanalyzer.data import DataStorage
 from qspectrumanalyzer.plot import SpectrumPlotWidget, WaterfallPlotWidget
-from qspectrumanalyzer.utils import str_to_color, human_time
+from qspectrumanalyzer.utils import executable_available, str_to_color, human_time
+from qspectrumanalyzer.windows_theme import (
+    DARK,
+    LIGHT,
+    THEME_DARK,
+    THEME_LIGHT,
+    THEME_SYSTEM,
+    apply_application_theme,
+    apply_native_window_theme,
+    configure_high_dpi,
+)
 
-from qspectrumanalyzer.settings import QSpectrumAnalyzerSettings
+from qspectrumanalyzer.settings import QSpectrumAnalyzerSettings, ensure_backend_settings_consistent
 from qspectrumanalyzer.smoothing import QSpectrumAnalyzerSmoothing
 from qspectrumanalyzer.persistence import QSpectrumAnalyzerPersistence
 from qspectrumanalyzer.colors import QSpectrumAnalyzerColors
@@ -34,6 +44,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         # Initialize UI
         super().__init__(parent)
         self.setupUi(self)
+        self.setWindowTitle(self.tr("QSpectrumAnalyzer — Windows 11"))
+        self.setMinimumSize(1000, 680)
 
         # Set window icon
         icon_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "qspectrumanalyzer.svg")
@@ -54,6 +66,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.install_shared_view_all_actions()
         self.create_peaks_dock()
         self.create_view_menu()
+        self.create_appearance_menu()
+        self.create_command_bar()
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -69,6 +83,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         self.update_buttons()
         self.load_settings()
+        QtCore.QTimer.singleShot(0, self.apply_saved_theme)
 
     def create_peaks_dock(self):
         """Create dock listing average spectrum peak frequencies."""
@@ -116,6 +131,119 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.menu_View.addSeparator()
         self.actionShowAllPanels = self.menu_View.addAction(self.tr("Show All Panels"))
         self.actionShowAllPanels.triggered.connect(self.show_all_dock_panels)
+
+        self.actionResetLayout = self.menu_View.addAction(self.tr("Reset panel layout"))
+        self.actionResetLayout.triggered.connect(self.reset_panel_layout)
+
+    def create_appearance_menu(self):
+        """Create a Windows-style system/light/dark appearance menu."""
+        self.menu_Appearance = QtWidgets.QMenu(self.tr("&Appearance"), self.menubar)
+        self.menu_Appearance.setObjectName("menu_Appearance")
+        self.menubar.insertMenu(self.menu_Help.menuAction(), self.menu_Appearance)
+
+        self.themeActionGroup = QtGui.QActionGroup(self)
+        self.themeActionGroup.setExclusive(True)
+        self.theme_actions = {}
+        labels = {
+            THEME_SYSTEM: self.tr("Use Windows setting"),
+            THEME_LIGHT: self.tr("Light"),
+            THEME_DARK: self.tr("Dark"),
+        }
+        for mode in (THEME_SYSTEM, THEME_LIGHT, THEME_DARK):
+            action = QtGui.QAction(labels[mode], self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.triggered.connect(lambda checked=False, value=mode: self.set_theme(value))
+            self.themeActionGroup.addAction(action)
+            self.menu_Appearance.addAction(action)
+            self.theme_actions[mode] = action
+
+    def create_command_bar(self):
+        """Add a compact command bar suitable for mouse and touch displays."""
+        self.commandBar = QtWidgets.QToolBar(self.tr("Commands"), self)
+        self.commandBar.setObjectName("commandBar")
+        self.commandBar.setMovable(False)
+        self.commandBar.setFloatable(False)
+        self.commandBar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.commandBar.setIconSize(QtCore.QSize(18, 18))
+        self.addToolBar(QtCore.Qt.TopToolBarArea, self.commandBar)
+
+        style = self.style()
+        self.actionStart = QtGui.QAction(
+            style.standardIcon(QtWidgets.QStyle.SP_MediaPlay), self.tr("Start"), self
+        )
+        self.actionStart.setShortcut(QtGui.QKeySequence("F5"))
+        self.actionStart.triggered.connect(lambda checked=False: self.start())
+        self.commandBar.addAction(self.actionStart)
+
+        self.actionStop = QtGui.QAction(
+            style.standardIcon(QtWidgets.QStyle.SP_MediaStop), self.tr("Stop"), self
+        )
+        self.actionStop.setShortcut(QtGui.QKeySequence("Shift+F5"))
+        self.actionStop.triggered.connect(lambda checked=False: self.stop())
+        self.commandBar.addAction(self.actionStop)
+
+        self.actionSingleShot = QtGui.QAction(
+            style.standardIcon(QtWidgets.QStyle.SP_BrowserReload), self.tr("Single shot"), self
+        )
+        self.actionSingleShot.setShortcut(QtGui.QKeySequence("F6"))
+        self.actionSingleShot.triggered.connect(lambda checked=False: self.start(single_shot=True))
+        self.commandBar.addAction(self.actionSingleShot)
+
+        self.commandBar.addSeparator()
+        self.actionViewAll = QtGui.QAction(self.tr("View all"), self)
+        self.actionViewAll.setShortcut(QtGui.QKeySequence("Ctrl+0"))
+        self.actionViewAll.triggered.connect(self.auto_range_plots)
+        self.commandBar.addAction(self.actionViewAll)
+        self.commandBar.addAction(self.action_Settings)
+
+        spacer = QtWidgets.QWidget(self.commandBar)
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.commandBar.addWidget(spacer)
+        self.backendLabel = QtWidgets.QLabel(self.commandBar)
+        self.backendLabel.setObjectName("backendLabel")
+        self.backendLabel.setContentsMargins(8, 0, 8, 0)
+        self.commandBar.addWidget(self.backendLabel)
+
+    @QtCore.Slot()
+    def reset_panel_layout(self):
+        """Restore a useful default layout without clearing measurement settings."""
+        self.show_all_dock_panels()
+        for dock in self.dock_widgets:
+            self.removeDockWidget(dock)
+        for dock in (self.controlsDockWidget, self.frequencyDockWidget,
+                     self.settingsDockWidget, self.levelsDockWidget, self.peaksDockWidget):
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        self.tabifyDockWidget(self.settingsDockWidget, self.levelsDockWidget)
+        self.tabifyDockWidget(self.settingsDockWidget, self.peaksDockWidget)
+        self.settingsDockWidget.raise_()
+        self.plotSplitter.setSizes([1, 1])
+
+    def set_theme(self, mode):
+        """Persist and apply an appearance selection."""
+        if mode not in self.theme_actions:
+            mode = THEME_SYSTEM
+        QtCore.QSettings().setValue("theme", mode)
+        self.apply_saved_theme()
+
+    def apply_saved_theme(self):
+        """Apply the saved theme to widgets, plots, and the native title bar."""
+        settings = QtCore.QSettings()
+        mode = settings.value("theme", THEME_SYSTEM)
+        if mode not in self.theme_actions:
+            mode = THEME_SYSTEM
+        self.theme_actions[mode].setChecked(True)
+        _, dark = apply_application_theme(QtWidgets.QApplication.instance(), mode)
+        colors = DARK if dark else LIGHT
+
+        for layout in (self.mainPlotLayout, self.waterfallPlotLayout, self.histogramPlotLayout):
+            layout.setBackground(colors["plot"])
+        for plot in (self.spectrumPlotWidget.plot, self.waterfallPlotWidget.plot):
+            for name in ("left", "bottom"):
+                axis = plot.getAxis(name)
+                axis.setPen(colors["plot_text"])
+                axis.setTextPen(colors["plot_text"])
+        apply_native_window_theme(self, dark)
 
     @QtCore.Slot()
     def show_all_dock_panels(self):
@@ -187,6 +315,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.stop()
 
         settings = QtCore.QSettings()
+        ensure_backend_settings_consistent(settings)
         self.data_storage = DataStorage(max_history_size=settings.value("waterfall_history_size", 100, int))
         self.data_storage.data_updated.connect(self.update_data)
         self.data_storage.data_updated.connect(self.spectrumPlotWidget.update_plot)
@@ -208,6 +337,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             backend_module = getattr(backends, backend)
         except AttributeError:
             backend_module = backends.soapy_power
+        self.backendLabel.setText(self.tr("Backend: {} ").format(backend))
 
         if self.backend is None or backend != self.backend:
             self.backend = backend
@@ -256,6 +386,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.power_thread = backend_module.PowerThread(self.data_storage)
         self.power_thread.powerThreadStarted.connect(self.on_power_thread_started)
         self.power_thread.powerThreadStopped.connect(self.on_power_thread_stopped)
+        self.power_thread.powerThreadError.connect(self.on_power_thread_error)
 
     def set_dock_size(self, dock, width, height):
         """Ugly hack for resizing QDockWidget (because it doesn't respect minimumSize / sizePolicy set in Designer)
@@ -317,6 +448,13 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             # Update config version
             settings.setValue("config_version", 2)
 
+        if settings.value("config_version", 1, int) < 3:
+            # Peaks, settings, and waterfall levels share the lower panel.
+            self.tabifyDockWidget(self.settingsDockWidget, self.levelsDockWidget)
+            self.tabifyDockWidget(self.settingsDockWidget, self.peaksDockWidget)
+            self.settingsDockWidget.raise_()
+            settings.setValue("config_version", 3)
+
         # Window geometry has to be restored only after show(), because initial
         # maximization doesn't work otherwise (at least not in some window managers on X11)
         self.show()
@@ -370,9 +508,13 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
     def update_buttons(self):
         """Update state of control buttons"""
-        self.startButton.setEnabled(not self.power_thread.alive)
-        self.singleShotButton.setEnabled(not self.power_thread.alive)
-        self.stopButton.setEnabled(self.power_thread.alive)
+        idle = not self.power_thread.alive
+        self.startButton.setEnabled(idle)
+        self.singleShotButton.setEnabled(idle)
+        self.stopButton.setEnabled(not idle)
+        self.actionStart.setEnabled(idle)
+        self.actionSingleShot.setEnabled(idle)
+        self.actionStop.setEnabled(not idle)
 
     def update_data(self, data_storage):
         """Update GUI when new data is received"""
@@ -428,9 +570,47 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.update_status()
         self.progressbar.setVisible(False)
 
+    @QtCore.Slot(str)
+    def on_power_thread_error(self, message):
+        """Display backend failures which would otherwise be hidden on Windows."""
+        self.show_status(self.tr("Backend error"), timeout=0)
+        QtWidgets.QMessageBox.critical(
+            self,
+            self.tr("SDR backend error"),
+            message or self.tr("The SDR backend stopped unexpectedly."),
+        )
+
     def start(self, single_shot=False):
         """Start power thread"""
         settings = QtCore.QSettings()
+
+        if self.startFreqSpinBox.value() >= self.stopFreqSpinBox.value():
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.tr("Invalid frequency range"),
+                self.tr("Stop frequency must be greater than start frequency."),
+            )
+            return
+
+        executable = settings.value("executable", self.backend)
+        if not executable_available(executable):
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.tr("Backend not found"),
+                self.tr(
+                    "The backend executable could not be found:\n\n{}\n\n"
+                    "Install the SDR tools or select the executable in File → Settings."
+                ).format(executable),
+            )
+            return
+
+        if self.backend == "soapy_power" and backends.soapy_power.formatter is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.tr("soapy_power module not found"),
+                self.tr("Install the Windows dependencies before starting this backend."),
+            )
+            return
 
         self.prev_sweep_time = 0
         self.prev_data_timestamp = time.time()
@@ -662,7 +842,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     @QtCore.Slot()
     def on_baselineButton_clicked(self):
         dialog = QSpectrumAnalyzerBaseline(self)
-        if dialog.exec_():
+        if dialog.exec():
             settings = QtCore.QSettings()
             self.data_storage.set_subtract_baseline(
                 bool(self.subtractBaselineCheckBox.isChecked()),
@@ -672,7 +852,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     @QtCore.Slot()
     def on_smoothButton_clicked(self):
         dialog = QSpectrumAnalyzerSmoothing(self)
-        if dialog.exec_():
+        if dialog.exec():
             settings = QtCore.QSettings()
             self.data_storage.set_smooth(
                 bool(self.smoothCheckBox.isChecked()),
@@ -684,7 +864,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     def on_persistenceButton_clicked(self):
         prev_persistence_length = self.spectrumPlotWidget.persistence_length
         dialog = QSpectrumAnalyzerPersistence(self)
-        if dialog.exec_():
+        if dialog.exec():
             settings = QtCore.QSettings()
             persistence_length = settings.value("persistence_length", 5, int)
             self.spectrumPlotWidget.persistence_length = persistence_length
@@ -699,7 +879,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     @QtCore.Slot()
     def on_colorsButton_clicked(self):
         dialog = QSpectrumAnalyzerColors(self)
-        if dialog.exec_():
+        if dialog.exec():
             settings = QtCore.QSettings()
             self.spectrumPlotWidget.main_color = str_to_color(settings.value("main_color", "255, 255, 0, 255"))
             self.spectrumPlotWidget.peak_hold_max_color = str_to_color(settings.value("peak_hold_max_color", "255, 0, 0, 255"))
@@ -712,7 +892,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     @QtCore.Slot()
     def on_action_Settings_triggered(self):
         dialog = QSpectrumAnalyzerSettings(self)
-        if dialog.exec_():
+        if dialog.exec():
             self.setup_power_thread()
 
     @QtCore.Slot()
@@ -733,6 +913,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 def main():
     global debug
 
+    configure_high_dpi()
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         prog="qspectrumanalyzer",
@@ -746,9 +928,10 @@ def main():
     debug = args.debug
 
     try:
+        if sys.platform == 'win32':
+            from qspectrumanalyzer import windows
         # Hide console window on Windows
         if sys.platform == 'win32' and not debug:
-            from qspectrumanalyzer import windows
             windows.set_attached_console_visible(False)
 
         # Start PyQt application
@@ -756,8 +939,13 @@ def main():
         app.setOrganizationName("QSpectrumAnalyzer")
         app.setOrganizationDomain("qspectrumanalyzer.eutopia.cz")
         app.setApplicationName("QSpectrumAnalyzer")
+        app.setApplicationDisplayName("QSpectrumAnalyzer")
+        app.setApplicationVersion(__version__)
+        apply_application_theme(app, QtCore.QSettings().value("theme", THEME_SYSTEM))
+        if sys.platform == "win32":
+            windows.set_windows_appusermodelid()
         window = QSpectrumAnalyzerMainWindow()
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     finally:
         # Unhide console window on Windows (we don't want to leave zombies behind)
         if sys.platform == 'win32' and not debug:

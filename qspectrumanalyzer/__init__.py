@@ -1,0 +1,1 @@
+"""QSpectrumAnalyzer desktop application package."""
