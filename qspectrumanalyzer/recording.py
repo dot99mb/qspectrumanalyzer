@@ -143,9 +143,16 @@ class RecordingWidget(QtWidgets.QWidget):
         self.statusLabel.setTextFormat(QtCore.Qt.PlainText)
         layout.addWidget(self.statusLabel)
         self.directoryEdit.editingFinished.connect(self.save_settings)
-        self.thresholdSpinBox.valueChanged.connect(self.save_settings)
+        self.thresholdSpinBox.valueChanged.connect(self.threshold_changed)
         self.delimiterEdit.editingFinished.connect(self.save_settings)
         self.update_controls()
+
+    def threshold_changed(self, value):
+        # Each sweep carries its own threshold, so live changes remain explicit
+        # in the CSV metadata and take effect on the next frame written.
+        if self.recorder.active:
+            self.recorder.threshold = value
+        self.save_settings()
 
     def save_settings(self):
         settings = QtCore.QSettings()
@@ -164,7 +171,7 @@ class RecordingWidget(QtWidgets.QWidget):
     def update_controls(self):
         active = self.recorder.active
         for widget in (self.directoryEdit, self.directoryButton,
-                       self.thresholdSpinBox, self.delimiterEdit, self.startButton):
+                       self.delimiterEdit, self.startButton):
             widget.setEnabled(not active)
         self.stopButton.setEnabled(active)
 

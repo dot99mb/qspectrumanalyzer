@@ -1,6 +1,29 @@
+from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_FLOOR, ROUND_CEILING
+
 import numpy as np
 
 from Qt import QtGui
+
+
+ROUNDING_MODES = {
+    'nearest': ROUND_HALF_UP,
+    'even': ROUND_HALF_EVEN,
+    'down': ROUND_FLOOR,
+    'up': ROUND_CEILING,
+}
+
+
+def round_frequencies(frequencies, decimals, mode):
+    """Round Hz values to a decimal MHz grid, with explicit tie handling."""
+    if decimals not in range(7) or mode not in ROUNDING_MODES:
+        raise ValueError('Choose 0–6 MHz decimal places and a valid rounding mode.')
+    step = Decimal(10) ** (6 - decimals)
+    unique, inverse = np.unique(np.asarray(frequencies, dtype=float), return_inverse=True)
+    # Round each distinct frequency once. Decimal avoids binary arithmetic
+    # sending an exact decimal boundary or half-step to the wrong grid cell.
+    rounded = np.array([float((Decimal(str(value)) / step).to_integral_value(
+        rounding=ROUNDING_MODES[mode]) * step) for value in unique])
+    return rounded[inverse]
 
 
 def smooth(x, window_len=11, window='hanning'):

@@ -29,6 +29,10 @@ def set_curve_data(curve, x, y, name):
 class SpectrumPlotWidget:
     """Main spectrum plot"""
     def __init__(self, layout):
+        self.peak_cursor_callback = None
+        self.trigger_level_callback = None
+        self.snapshot_curves = []
+        self.snapshot_legend = None
         if not isinstance(layout, pg.GraphicsLayoutWidget):
             raise ValueError("layout must be instance of pyqtgraph.GraphicsLayoutWidget")
 
@@ -82,6 +86,46 @@ class SpectrumPlotWidget:
         self.plot.addItem(self.hLine, ignoreBounds=True)
         self.mouseProxy = pg.SignalProxy(self.plot.scene().sigMouseMoved,
                                          rateLimit=60, slot=self.mouse_moved)
+        self.plot.scene().sigMouseClicked.connect(self.mouse_clicked)
+
+    def snapshot_data(self):
+        """Copy exactly the visible plotted curves, including their own axes."""
+        candidates = [('Main', self.curve), ('Average', self.curve_average),
+                      ('Max hold', self.curve_peak_hold_max), ('Min hold', self.curve_peak_hold_min),
+                      ('Baseline', self.curve_baseline)]
+        candidates.extend(('Persistence {}'.format(i + 1), curve) for i, curve in enumerate(self.persistence_curves))
+        candidates.extend(('Snapshot {}'.format(i + 1), curve) for i, curve in enumerate(self.snapshot_curves))
+        result = []
+        for name, curve in candidates:
+            x, y = curve.getOriginalDataset()
+            if not curve.isVisible() or x is None or y is None or not len(x):
+                continue
+            result.append(dict(name=name, x=np.array(x, copy=True), y=np.array(y, copy=True),
+                               color=list(pg.mkPen(curve.opts['pen']).color().getRgb())))
+        return result
+
+    def display_snapshot(self, snapshot):
+        for curve in self.snapshot_curves:
+            self.plot.removeItem(curve)
+        self.snapshot_curves = []
+        if self.snapshot_legend is not None:
+            self.snapshot_legend.clear()
+        if snapshot is None:
+            return
+        if self.snapshot_legend is None:
+            self.snapshot_legend = self.plot.addLegend(offset=(10, 10))
+        for record in snapshot['curves']:
+            # Thick antialiased dashed paths can block Qt's raster painter for
+            # seconds on full sweeps. Reduce only display data, preserving peaks
+            # and the original arrays for zooming and subsequent snapshots.
+            pen = pg.mkPen(tuple(record['color']), width=1)
+            curve = self.plot.plot(record['x'], record['y'], pen=pen,
+                                   antialias=False,
+                                   name=(snapshot.get('name') or 'Snapshot') + ': ' + record['name'])
+            curve.setDownsampling(auto=True, method='peak')
+            curve.setClipToView(True)
+            curve.setZValue(950)
+            self.snapshot_curves.append(curve)
 
     def create_main_curve(self):
         """Create main spectrum curve"""
@@ -249,14 +293,28 @@ class SpectrumPlotWidget:
         pos = evt[0]
         if self.plot.sceneBoundingRect().contains(pos):
             mousePoint = self.plot.vb.mapSceneToView(pos)
-            self.posLabel.setText(
-                "<span style='font-size: 12pt'>f={:0.3f} MHz, P={:0.3f} dB</span>".format(
-                    mousePoint.x() / 1e6,
-                    mousePoint.y()
-                )
-            )
-            self.vLine.setPos(mousePoint.x())
-            self.hLine.setPos(mousePoint.y())
+            self.set_cursor(mousePoint.x(), mousePoint.y())
+
+    def set_cursor(self, frequency, power):
+        self.posLabel.setText(
+            "<span style='font-size: 12pt'>f={:.6f} MHz, P={:.3f} dB</span>".format(frequency / 1e6, power))
+        self.vLine.setPos(frequency)
+        self.hLine.setPos(power)
+
+    def mouse_clicked(self, event):
+        if (event.button() == QtCore.Qt.LeftButton and
+                self.plot.vb.sceneBoundingRect().contains(event.scenePos())):
+            point = self.plot.vb.mapSceneToView(event.scenePos())
+            if event.double() and self.trigger_level_callback:
+                self.trigger_level_callback(point.y())
+                event.accept()
+                return
+            if not self.peak_cursor_callback:
+                return
+            pixel_x, pixel_y = self.plot.vb.viewPixelSize()
+            # Hit-test both coordinates within 8 screen pixels, independent of
+            # zoom. Clicking empty space must not jump to a neighboring peak.
+            self.peak_cursor_callback(point.x(), point.y(), abs(pixel_x) * 8, abs(pixel_y) * 8)
 
     def clear_plot(self):
         """Clear main spectrum curve"""

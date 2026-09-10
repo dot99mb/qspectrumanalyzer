@@ -19,6 +19,7 @@ from qspectrumanalyzer.colors import QSpectrumAnalyzerColors
 from qspectrumanalyzer.baseline import QSpectrumAnalyzerBaseline
 from qspectrumanalyzer.peaks import PeakListWidget
 from qspectrumanalyzer.recording import RecordingWidget
+from qspectrumanalyzer.snapshots import SnapshotWidget, save_snapshot
 
 from qspectrumanalyzer.ui_qspectrumanalyzer import Ui_QSpectrumAnalyzerMainWindow
 
@@ -49,12 +50,18 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         # Create plot widgets and update UI
         self.spectrumPlotWidget = SpectrumPlotWidget(self.mainPlotLayout)
         self.waterfallPlotWidget = WaterfallPlotWidget(self.waterfallPlotLayout, self.histogramPlotLayout)
+        # Linked views align by screen position; equal axis gutters prevent
+        # differing labels from shifting the requested frequency boundaries.
+        self.spectrumPlotWidget.plot.getAxis("left").setWidth(80)
+        self.waterfallPlotWidget.plot.getAxis("left").setWidth(80)
 
         # Link main spectrum plot to waterfall plot
         self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
         self.install_shared_view_all_actions()
         self.create_peaks_dock()
         self.create_recording_dock()
+        self.create_snapshots_dock()
+        self.spectrumPlotWidget.trigger_level_callback = self.set_trigger_levels
         self.create_view_menu()
         self.analysis_window = None
         self.actionAnalyzeRecording = self.menu_File.addAction(self.tr("Analyze recording..."))
@@ -85,6 +92,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         )
 
         self.peakListWidget = PeakListWidget(self.peaksDockWidget)
+        self.peakListWidget.peak_selected.connect(self.spectrumPlotWidget.set_cursor)
+        self.spectrumPlotWidget.peak_cursor_callback = self.peakListWidget.follow_frequency
         self.peakListWidget.refresh_requested.connect(self.refresh_peak_frequencies)
         self.peakListWidget.auto_refresh_toggled.connect(self.set_peak_auto_refresh)
         self.peakListWidget.refresh_interval_changed.connect(self.set_peak_refresh_interval)
@@ -107,6 +116,14 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.analysis_window.raise_()
         self.analysis_window.activateWindow()
 
+    def set_trigger_levels(self, power):
+        if not np.isfinite(power):
+            return
+        self.recordingWidget.thresholdSpinBox.setValue(power)
+        self.peakListWidget.minPowerSpinBox.setValue(self.recordingWidget.thresholdSpinBox.value())
+        self.show_status("Trigger level: {:.1f} dB (Peaks and CSV recording)".format(
+            self.recordingWidget.thresholdSpinBox.value()))
+
     def create_recording_dock(self):
         self.recordingDockWidget = QtWidgets.QDockWidget(self.tr("CSV recording"), self)
         self.recordingDockWidget.setObjectName("recordingDockWidget")
@@ -115,6 +132,48 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.recordingDockWidget)
         self.tabifyDockWidget(self.peaksDockWidget, self.recordingDockWidget)
         self.peaksDockWidget.raise_()
+
+    def create_snapshots_dock(self):
+        self.snapshot_previous_range = None
+        self.snapshotsDockWidget = QtWidgets.QDockWidget(self.tr("Spectrum snapshots"), self)
+        self.snapshotsDockWidget.setObjectName("snapshotsDockWidget")
+        self.snapshotWidget = SnapshotWidget(self.snapshotsDockWidget)
+        self.snapshotWidget.capture_requested.connect(self.capture_snapshot)
+        self.snapshotWidget.display_requested.connect(self.display_snapshot)
+        self.snapshotsDockWidget.setWidget(self.snapshotWidget)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.snapshotsDockWidget)
+        self.tabifyDockWidget(self.peaksDockWidget, self.snapshotsDockWidget)
+        self.peaksDockWidget.raise_()
+
+    def capture_snapshot(self):
+        panel = self.snapshotWidget
+        try:
+            directory = panel.directoryEdit.text()
+            if not directory.strip():
+                raise ValueError("Select a snapshot directory")
+            curves = self.spectrumPlotWidget.snapshot_data()
+            if not curves:
+                raise ValueError("No visible spectrum data to capture")
+            path = save_snapshot(directory, curves, self.spectrumPlotWidget.plot.viewRange(),
+                                 self.mainPlotLayout.grab())
+            QtCore.QSettings().setValue("snapshots/directory", directory)
+            panel.refresh_list(selected=path)
+            panel.statusLabel.setText("Snapshot saved (PNG + NPZ)")
+            panel.statusLabel.setToolTip(str(path))
+        except (OSError, ValueError) as error:
+            panel.error(error)
+
+    def display_snapshot(self, snapshot):
+        plot = self.spectrumPlotWidget.plot
+        if snapshot is not None and self.snapshot_previous_range is None:
+            self.snapshot_previous_range = plot.viewRange()
+        self.spectrumPlotWidget.display_snapshot(snapshot)
+        ranges = snapshot['view_range'] if snapshot is not None else self.snapshot_previous_range
+        if ranges is not None:
+            plot.setXRange(*ranges[0], padding=0)
+            plot.setYRange(*ranges[1], padding=0)
+        if snapshot is None:
+            self.snapshot_previous_range = None
 
     def create_view_menu(self):
         """Create actions for closing and reopening dock panels."""
@@ -129,6 +188,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.levelsDockWidget,
             self.peaksDockWidget,
             self.recordingDockWidget,
+            self.snapshotsDockWidget,
         )
         for dock in self.dock_widgets:
             dock.setFeatures(dock.features() | QtWidgets.QDockWidget.DockWidgetClosable)
@@ -368,7 +428,14 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         # Restore window state
         if settings.value("window_state"):
-            self.restoreState(settings.value("window_state"))
+            state = settings.value("window_state")
+            self.restoreState(state)
+            # Layouts saved before snapshots existed do not position the new
+            # dock. Leaving it below Settings makes the window taller than the
+            # screen. Migrate only old layouts, preserving newer arrangements.
+            if "snapshotsDockWidget".encode("utf-16-be") not in bytes(state):
+                self.tabifyDockWidget(self.peaksDockWidget, self.snapshotsDockWidget)
+                self.peaksDockWidget.raise_()
         if settings.value("plotsplitter_state"):
             self.plotSplitter.restoreState(settings.value("plotsplitter_state"))
         self.actionWaterfall.setChecked(bool(settings.value("waterfall_enabled", 1, int)))
@@ -390,6 +457,33 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         if settings.value("window_geometry"):
             self.restoreGeometry(settings.value("window_geometry"))
             QtCore.QTimer.singleShot(0, self.ensure_plot_splitter_visible)
+        QtCore.QTimer.singleShot(0, self.fit_frequency_range)
+        QtCore.QTimer.singleShot(0, self.ensure_window_visible)
+
+    def ensure_window_visible(self):
+        """Restore an accessible window even after screen/layout changes."""
+        if self.isMinimized():
+            self.showNormal()
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        if not self.isMaximized() and not self.isFullScreen():
+            frame = self.frameGeometry()
+            if not available.contains(frame):
+                extra_width = frame.width() - self.width()
+                extra_height = frame.height() - self.height()
+                self.resize(min(self.width(), available.width() - extra_width),
+                            min(self.height(), available.height() - extra_height))
+                self.move(available.topLeft())
+        self.raise_()
+        self.activateWindow()
+
+    def fit_frequency_range(self):
+        """Show configured frequencies without depending on waterfall linkage."""
+        start, stop = sorted((self.startFreqSpinBox.value() * 1e6,
+                              self.stopFreqSpinBox.value() * 1e6))
+        if self.actionWaterfall.isChecked():
+            self.waterfallPlotWidget.set_frequency_range(start, stop)
+        self.spectrumPlotWidget.plot.setXRange(start, stop, padding=0)
 
     def ensure_plot_splitter_visible(self):
         """Prevent restored splitter state from hiding one of the plots"""
@@ -541,7 +635,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         start_freq = float(self.startFreqSpinBox.value()) * 1e6
         stop_freq = float(self.stopFreqSpinBox.value()) * 1e6
         self.data_storage.set_frequency_range(start_freq, stop_freq)
-        self.waterfallPlotWidget.set_frequency_range(start_freq, stop_freq)
+        self.fit_frequency_range()
         self.data_storage.set_smooth(
             bool(self.smoothCheckBox.isChecked()),
             settings.value("smooth_length", 11, int),

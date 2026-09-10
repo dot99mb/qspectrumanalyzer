@@ -2,7 +2,6 @@
 
 import csv
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_FLOOR, ROUND_CEILING
 from pathlib import Path
 
 import numpy as np
@@ -10,25 +9,7 @@ import pyqtgraph as pg
 from Qt import QtCore, QtWidgets
 
 
-ROUNDING_MODES = {
-    'nearest': ROUND_HALF_UP,
-    'even': ROUND_HALF_EVEN,
-    'down': ROUND_FLOOR,
-    'up': ROUND_CEILING,
-}
-
-
-def round_frequencies(frequencies, decimals, mode):
-    """Round Hz values to a decimal MHz grid, with explicit tie handling."""
-    if decimals not in range(7) or mode not in ROUNDING_MODES:
-        raise ValueError('Choose 0–6 MHz decimal places and a valid rounding mode.')
-    step = Decimal(10) ** (6 - decimals)
-    unique, inverse = np.unique(np.asarray(frequencies, dtype=float), return_inverse=True)
-    # Round each distinct frequency once. Decimal avoids binary arithmetic
-    # sending an exact decimal boundary or half-step to the wrong grid cell.
-    rounded = np.array([float((Decimal(str(value)) / step).to_integral_value(
-        rounding=ROUNDING_MODES[mode]) * step) for value in unique])
-    return rounded[inverse]
+from qspectrumanalyzer.utils import round_frequencies
 
 
 class RecordingData:
