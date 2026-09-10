@@ -42,6 +42,25 @@ def read_snapshot(path, metadata_only=False):
         ranges = np.asarray(metadata['view_range'], dtype=float)
         if ranges.shape != (2, 2) or not np.isfinite(ranges).all() or np.any(ranges[:, 1] <= ranges[:, 0]):
             raise ValueError('Invalid snapshot view range')
+        kind = metadata.get('kind', 'spectrum')
+        if kind not in ('spectrum', 'waterfall'):
+            raise ValueError('Unknown snapshot type')
+        if kind == 'waterfall':
+            datetime.fromisoformat(metadata['created'])
+            frequency_range = np.asarray(metadata['frequency_range'], dtype=float)
+            levels = np.asarray(metadata['levels'], dtype=float)
+            if frequency_range.shape != (2,) or not np.isfinite(frequency_range).all() or frequency_range[1] <= frequency_range[0]:
+                raise ValueError('Invalid waterfall frequency range')
+            if levels.shape != (2,) or not np.isfinite(levels).all() or levels[1] < levels[0]:
+                raise ValueError('Invalid waterfall levels')
+            if metadata_only:
+                return metadata
+            x, history, lut = archive['frequencies'], archive['history'], archive['lut']
+            if x.ndim != 1 or not x.size or not np.isfinite(x).all() or history.ndim != 2 or history.shape[1] != x.size or history.shape[0] < 1:
+                raise ValueError('Invalid waterfall data dimensions')
+            if history.dtype.kind not in 'fiu' or lut.ndim != 2 or lut.shape[1] not in (3, 4) or lut.dtype != np.uint8:
+                raise ValueError('Invalid waterfall image data')
+            return dict(metadata, frequencies=x, history=history, lut=lut)
         if not isinstance(metadata['created'], str) or not isinstance(metadata['curves'], list) or not metadata['curves']:
             raise ValueError('Invalid snapshot metadata')
         datetime.fromisoformat(metadata['created'])
@@ -69,11 +88,11 @@ def read_snapshot(path, metadata_only=False):
         return dict(metadata, curves=curves)
 
 
-def save_snapshot(directory, curves, view_range, screenshot):
+def save_snapshot(directory, curves, view_range, screenshot, waterfall=None):
     directory = Path(directory).expanduser()
     if not directory.is_dir():
         raise ValueError('Select an existing snapshot directory')
-    if not curves:
+    if waterfall is None and not curves:
         raise ValueError('No visible spectrum data to capture. Start a measurement and enable a curve.')
     if screenshot.isNull():
         raise ValueError('Could not capture the spectrum image')
@@ -86,6 +105,11 @@ def save_snapshot(directory, curves, view_range, screenshot):
     for i, curve in enumerate(curves):
         arrays['x{}'.format(i)] = curve['x']
         arrays['y{}'.format(i)] = curve['y']
+    if waterfall is not None:
+        metadata.update(kind='waterfall', frequency_range=waterfall['frequency_range'],
+                        levels=waterfall['levels'])
+        arrays.update(frequencies=waterfall['frequencies'], history=waterfall['history'], lut=waterfall['lut'])
+        arrays['metadata'] = np.array(json.dumps(metadata))
     temporary_paths = []
     published_image = False
     try:
@@ -111,13 +135,66 @@ def save_snapshot(directory, curves, view_range, screenshot):
     return data_path
 
 
+class SnapshotSaveThread(QtCore.QThread):
+    """Compress and write immutable capture data without blocking Qt events."""
+    def __init__(self, directory, curves, view_range, image, waterfall=None, parent=None):
+        super().__init__(parent)
+        self.arguments = (directory, curves, view_range, image, waterfall)
+        self.path = None
+        self.error = None
+
+    def run(self):
+        try:
+            self.path = save_snapshot(*self.arguments)
+        except Exception as error:
+            self.error = str(error)
+        finally:
+            self.arguments = None
+
+
+class SnapshotLoadThread(QtCore.QThread):
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.snapshot = None
+        self.error = None
+
+    def run(self):
+        try:
+            self.snapshot = read_snapshot(self.path)
+            self.snapshot['filename'] = self.path.name
+            if self.snapshot.get('kind') == 'waterfall':
+                # Prepare colour indices off-thread. Qt then paints a compact
+                # uint8 image instead of repeatedly processing a huge float array.
+                history = self.snapshot['history']
+                low, high = self.snapshot['levels']
+                scale = 255. / (high - low) if high > low else 0.
+                pixels = np.empty(history.shape, dtype=np.uint8)
+                for row in range(history.shape[0]):
+                    if self.isInterruptionRequested():
+                        self.snapshot = None
+                        return
+                    values = (history[row] - low) * scale
+                    np.nan_to_num(values, copy=False, nan=0., posinf=255., neginf=0.)
+                    pixels[row] = np.clip(values, 0, 255).astype(np.uint8)
+                self.snapshot['display_image'] = pixels
+                del self.snapshot['history']
+        except Exception as error:
+            self.error = str(error)
+            self.snapshot = None
+
+
 class SnapshotWidget(QtWidgets.QWidget):
     capture_requested = QtCore.Signal()
     display_requested = QtCore.Signal(object)
+    loading_finished = QtCore.Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.preview_path = None
+        self.load_thread = None
+        self.pending_path = None
+        self.load_generation = 0
         layout = QtWidgets.QVBoxLayout(self)
         directory_row = QtWidgets.QHBoxLayout()
         directory_row.addWidget(QtWidgets.QLabel('Directory:'))
@@ -128,6 +205,13 @@ class SnapshotWidget(QtWidgets.QWidget):
         directory_row.addWidget(self.directoryEdit, 1)
         directory_row.addWidget(self.directoryButton)
         layout.addLayout(directory_row)
+        self.typeComboBox = QtWidgets.QComboBox()
+        self.typeComboBox.addItem('Spectrum', 'spectrum')
+        self.typeComboBox.addItem('Waterfall', 'waterfall')
+        type_row = QtWidgets.QHBoxLayout()
+        type_row.addWidget(QtWidgets.QLabel('Snapshot type:'))
+        type_row.addWidget(self.typeComboBox, 1)
+        layout.addLayout(type_row)
         buttons = QtWidgets.QHBoxLayout()
         self.captureButton = QtWidgets.QPushButton('Capture snapshot')
         self.captureButton.clicked.connect(lambda: self.capture_requested.emit())
@@ -142,8 +226,8 @@ class SnapshotWidget(QtWidgets.QWidget):
         self.displayCheckBox.setToolTip('Show the selected snapshot over the live spectrum')
         self.displayCheckBox.toggled.connect(self.display_selected)
         layout.addWidget(self.displayCheckBox)
-        self.table = QtWidgets.QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(['Name', 'Captured', 'Range [MHz]', 'Curves'])
+        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(['Name', 'Captured', 'Range [MHz]', 'Curves', 'Type'])
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed)
@@ -209,8 +293,10 @@ class SnapshotWidget(QtWidgets.QWidget):
             for path in sorted(directory.glob('spectrum_*.npz'), reverse=True):
                 try:
                     metadata = read_snapshot(path, metadata_only=True)
-                    start, stop = metadata['view_range'][0]
-                    entries.append((path, metadata.get('name', ''), metadata['created'], start, stop, len(metadata['curves'])))
+                    kind = metadata.get('kind', 'spectrum')
+                    start, stop = metadata['frequency_range'] if kind == 'waterfall' else metadata['view_range'][0]
+                    entries.append((path, metadata.get('name', ''), metadata['created'], start, stop,
+                                    len(metadata['curves']) if kind == 'spectrum' else '—', kind.title()))
                 except (OSError, ValueError, KeyError, TypeError, BadZipFile, EOFError):
                     skipped += 1
         except (OSError, ValueError) as error:
@@ -221,9 +307,9 @@ class SnapshotWidget(QtWidgets.QWidget):
         self.table.blockSignals(True)
         self.table.setRowCount(len(entries))
         selected_row = -1
-        for row, (path, name, created, start, stop, count) in enumerate(entries):
+        for row, (path, name, created, start, stop, count, kind) in enumerate(entries):
             captured = datetime.fromisoformat(created).strftime('%Y-%m-%d %H:%M:%S')
-            for col, value in enumerate([name, captured, '{:.3f}–{:.3f}'.format(start / 1e6, stop / 1e6), str(count)]):
+            for col, value in enumerate([name, captured, '{:.3f}–{:.3f}'.format(start / 1e6, stop / 1e6), str(count), kind]):
                 item = QtWidgets.QTableWidgetItem(value)
                 item.setToolTip(str(path))
                 if col != 0:
@@ -275,16 +361,50 @@ class SnapshotWidget(QtWidgets.QWidget):
 
     def display_selected(self, *args):
         path = self.selected_path()
-        if not self.displayCheckBox.isChecked() or path is None:
-            self.display_requested.emit(None)
+        self.load_generation += 1
+        self.pending_path = path if self.displayCheckBox.isChecked() else None
+        self.display_requested.emit(None)
+        if self.load_thread is not None:
+            self.load_thread.requestInterruption()
+        if self.pending_path is not None:
+            self.statusLabel.setText('Loading snapshot…')
+            self.start_pending_load()
+        elif self.load_thread is not None:
+            self.statusLabel.setText('Snapshot display cancelled')
+
+    def start_pending_load(self):
+        if self.load_thread is not None or self.pending_path is None:
             return
-        try:
-            snapshot = read_snapshot(path)
-            snapshot['filename'] = path.name
-            self.display_requested.emit(snapshot)
-        except (OSError, ValueError, KeyError, TypeError, BadZipFile, EOFError) as error:
-            self.display_requested.emit(None)
-            self.error(error)
+        worker = SnapshotLoadThread(self.pending_path, self)
+        worker.generation = self.load_generation
+        self.load_thread = worker
+        worker.finished.connect(self.load_finished)
+        worker.start()
+
+    @QtCore.Slot()
+    def load_finished(self):
+        worker = self.load_thread
+        self.load_thread = None
+        current = worker.generation == self.load_generation and self.pending_path == worker.path
+        snapshot, error = worker.snapshot, worker.error
+        worker.snapshot = None
+        worker.deleteLater()
+        if current:
+            self.pending_path = None
+            if error is not None:
+                self.error(error)
+            elif snapshot is not None:
+                self.statusLabel.setText('Snapshot loaded')
+                self.display_requested.emit(snapshot)
+        else:
+            self.start_pending_load()
+        self.loading_finished.emit()
+
+    def cancel_loading(self):
+        self.load_generation += 1
+        self.pending_path = None
+        if self.load_thread is not None:
+            self.load_thread.requestInterruption()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

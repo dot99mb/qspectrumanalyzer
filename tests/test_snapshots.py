@@ -1,4 +1,6 @@
 import tempfile
+import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +38,8 @@ class SnapshotTests(unittest.TestCase):
         self.plot.plot.setRange(xRange=(100e6, 110e6), yRange=(-100, -70), padding=0)
 
     def tearDown(self):
+        self.window.snapshotWidget.cancel_loading()
+        self.wait_for_load()
         self.window.data_storage.wait()
         self.window.close()
         self.app.processEvents()
@@ -43,7 +47,109 @@ class SnapshotTests(unittest.TestCase):
 
     def capture(self):
         self.window.capture_snapshot()
+        self.wait_for_capture()
+        self.wait_for_load()
         return self.window.snapshotWidget.selected_path()
+
+    def wait_for_load(self):
+        deadline = time.monotonic() + 10
+        while self.window.snapshotWidget.load_thread is not None and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertIsNone(self.window.snapshotWidget.load_thread)
+
+    def wait_for_capture(self):
+        deadline = time.monotonic() + 10
+        while self.window.snapshot_save_thread is not None and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertIsNone(self.window.snapshot_save_thread)
+
+    def prepare_waterfall(self):
+        w = self.window
+        w.actionWaterfall.setChecked(True)
+        w.startFreqSpinBox.setValue(100)
+        w.stopFreqSpinBox.setValue(110)
+        w.fit_frequency_range()
+        w.data_storage.data_updated.disconnect(w.update_data)
+        w.data_storage.set_frequency_range(100e6, 110e6)
+        for offset in range(3):
+            w.data_storage.update(dict(x=np.linspace(100e6, 110e6, 20),
+                                       y=np.arange(20.) - 90 + offset, timestamp=time.time()))
+            w.data_storage.wait()
+            self.app.processEvents()
+        w.snapshotWidget.typeComboBox.setCurrentIndex(1)
+
+    def test_waterfall_roundtrip_and_linked_zoom(self):
+        self.prepare_waterfall()
+        waterfall = self.window.waterfallPlotWidget
+        history = waterfall.waterfallImg.image.T.copy()
+        path = self.capture()
+        snapshot = read_snapshot(path)
+        self.assertEqual(snapshot['kind'], 'waterfall')
+        np.testing.assert_array_equal(snapshot['history'], history)
+        self.assertEqual(snapshot['frequency_range'], [100e6, 110e6])
+        self.assertFalse(QtGui.QImage(str(path.with_suffix('.png'))).isNull())
+        waterfall.plot.setXRange(102e6, 104e6, padding=0)
+        self.window.snapshotWidget.displayCheckBox.setChecked(True)
+        self.wait_for_load()
+        self.app.processEvents()
+        np.testing.assert_allclose(waterfall.snapshot_plot.viewRange()[0], [102e6, 104e6], atol=1)
+        waterfall.plot.setXRange(103e6, 105e6, padding=0)
+        self.app.processEvents()
+        np.testing.assert_allclose(waterfall.snapshot_plot.viewRange()[0], [103e6, 105e6], atol=1)
+        np.testing.assert_array_equal(waterfall.snapshot_image.image.T,
+                                      np.clip((history - snapshot['levels'][0]) * 255 /
+                                              (snapshot['levels'][1] - snapshot['levels'][0]), 0, 255).astype(np.uint8))
+        waterfall.snapshot_plot.setXRange(104e6, 106e6, padding=0)
+        self.app.processEvents()
+        np.testing.assert_allclose(waterfall.plot.viewRange()[0], [104e6, 106e6], atol=1)
+        self.window.data_storage.update(dict(x=np.linspace(100e6, 110e6, 20),
+                                            y=np.full(20, -50.), timestamp=time.time()))
+        self.window.data_storage.wait()
+        self.app.processEvents()
+        np.testing.assert_array_equal(waterfall.snapshot_image.image.T,
+                                      np.clip((history - snapshot['levels'][0]) * 255 /
+                                              (snapshot['levels'][1] - snapshot['levels'][0]), 0, 255).astype(np.uint8))
+        self.window.snapshotWidget.table.item(0, 0).setText('Водопад')
+        self.wait_for_load()
+        self.assertEqual(read_snapshot(path)['name'], 'Водопад')
+        self.window.snapshotWidget.displayCheckBox.setChecked(False)
+        self.assertIsNone(waterfall.snapshot_plot)
+        self.assertIsNone(waterfall.snapshot_image)
+
+    def test_waterfall_rejects_mismatched_range_and_hides_on_range_change(self):
+        self.prepare_waterfall()
+        self.capture()
+        w = self.window
+        w.stopFreqSpinBox.setValue(111)
+        with patch.object(w.snapshotWidget, 'error') as error:
+            w.snapshotWidget.displayCheckBox.setChecked(True)
+            self.wait_for_load()
+        error.assert_called_once()
+        self.assertIsNone(w.waterfallPlotWidget.snapshot_plot)
+        self.assertFalse(w.snapshotWidget.displayCheckBox.isChecked())
+        w.stopFreqSpinBox.setValue(110)
+        w.snapshotWidget.displayCheckBox.setChecked(True)
+        self.wait_for_load()
+        self.assertIsNotNone(w.waterfallPlotWidget.snapshot_plot)
+        with patch.object(w.snapshotWidget, 'error') as error:
+            w.startFreqSpinBox.setValue(101)
+        error.assert_called_once()
+        self.assertIsNone(w.waterfallPlotWidget.snapshot_plot)
+
+    def test_waterfall_disabled_capture_rejected_and_display_released(self):
+        self.prepare_waterfall()
+        self.capture()
+        w = self.window
+        w.snapshotWidget.displayCheckBox.setChecked(True)
+        self.wait_for_load()
+        w.actionWaterfall.setChecked(False)
+        self.assertIsNone(w.waterfallPlotWidget.snapshot_image)
+        self.assertFalse(w.snapshotWidget.displayCheckBox.isChecked())
+        with patch.object(w.snapshotWidget, 'error') as error:
+            self.capture()
+        error.assert_called_once()
 
     def test_capture_roundtrip_preview_and_directory_persistence(self):
         path = self.capture()
@@ -68,14 +174,17 @@ class SnapshotTests(unittest.TestCase):
         self.capture()
         panel = self.window.snapshotWidget
         panel.displayCheckBox.setChecked(True)
+        self.wait_for_load()
         self.plot.curve_average.setData(self.x, self.y + 5)
         np.testing.assert_array_equal(self.plot.snapshot_curves[0].getData()[1], self.y)
         panel.displayCheckBox.setChecked(False)
         self.assertEqual(self.plot.snapshot_curves, [])
         self.capture()
         panel.displayCheckBox.setChecked(True)
+        self.wait_for_load()
         np.testing.assert_array_equal(self.plot.snapshot_curves[0].getData()[1], self.y + 5)
         panel.table.selectRow(1)
+        self.wait_for_load()
         self.assertEqual(len(self.plot.snapshot_curves), 1)
         np.testing.assert_array_equal(self.plot.snapshot_curves[0].getData()[1], self.y)
         panel.directoryEdit.setText(str(self.directory / 'missing'))
@@ -89,11 +198,126 @@ class SnapshotTests(unittest.TestCase):
                               self.window.mainPlotLayout.grab())
         self.assertEqual(list(self.directory.iterdir()), [])
 
+    def test_loading_is_responsive_and_latest_selection_wins(self):
+        self.capture()
+        self.plot.curve_average.setData(self.x, self.y + 10)
+        self.capture()
+        entered, release = threading.Event(), threading.Event()
+        def delayed_read(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return read_snapshot(*args, **kwargs)
+        panel = self.window.snapshotWidget
+        with patch('qspectrumanalyzer.snapshots.read_snapshot', side_effect=delayed_read):
+            try:
+                panel.displayCheckBox.setChecked(True)
+                self.assertTrue(entered.wait(1))
+                ticks = []
+                QtCore.QTimer.singleShot(0, lambda: ticks.append(True))
+                self.app.processEvents()
+                self.assertEqual(ticks, [True])
+                panel.table.selectRow(1)
+                self.assertEqual(self.plot.snapshot_curves, [])
+            finally:
+                release.set()
+                self.wait_for_load()
+        np.testing.assert_array_equal(self.plot.snapshot_curves[0].getOriginalDataset()[1], self.y)
+
+    def test_cancel_and_close_during_loading_discards_result(self):
+        self.capture()
+        release = threading.Event()
+        def delayed_read(*args, **kwargs):
+            release.wait(5)
+            return read_snapshot(*args, **kwargs)
+        panel = self.window.snapshotWidget
+        with patch('qspectrumanalyzer.snapshots.read_snapshot', side_effect=delayed_read):
+            try:
+                panel.displayCheckBox.setChecked(True)
+                panel.displayCheckBox.setChecked(False)
+                self.window.close()
+                self.assertTrue(self.window.isVisible())
+            finally:
+                release.set()
+                self.wait_for_load()
+        self.assertEqual(self.plot.snapshot_curves, [])
+        self.assertFalse(self.window.isVisible())
+
+    def test_background_load_error_is_reported(self):
+        self.capture()
+        panel = self.window.snapshotWidget
+        with patch('qspectrumanalyzer.snapshots.read_snapshot', side_effect=ValueError('broken snapshot')), \
+                patch.object(panel, 'error') as error:
+            panel.displayCheckBox.setChecked(True)
+            self.wait_for_load()
+        error.assert_called_once_with('broken snapshot')
+        self.assertEqual(self.plot.snapshot_curves, [])
+
+    def test_slow_save_keeps_event_loop_responsive_and_rejects_duplicate_capture(self):
+        entered, release = threading.Event(), threading.Event()
+        real_save = save_snapshot
+        def delayed_save(*args):
+            entered.set()
+            release.wait(5)
+            return real_save(*args)
+        with patch('qspectrumanalyzer.snapshots.save_snapshot', side_effect=delayed_save) as save:
+            try:
+                self.window.capture_snapshot()
+                self.assertTrue(entered.wait(1))
+                self.assertFalse(self.window.snapshotWidget.captureButton.isEnabled())
+                ticks = []
+                QtCore.QTimer.singleShot(0, lambda: ticks.append(True))
+                self.app.processEvents()
+                self.assertEqual(ticks, [True])
+                self.window.capture_snapshot()
+                self.assertEqual(save.call_count, 1)
+                self.plot.curve_average.setData(self.x, self.y + 10)
+            finally:
+                release.set()
+                self.wait_for_capture()
+        path = self.window.snapshotWidget.selected_path()
+        np.testing.assert_array_equal(read_snapshot(path)['curves'][0]['y'], self.y)
+        self.assertTrue(self.window.snapshotWidget.captureButton.isEnabled())
+
+    def test_save_failure_reenables_capture_and_keeps_no_partial_pair(self):
+        with patch('qspectrumanalyzer.snapshots.np.savez_compressed', side_effect=OSError('disk full')), \
+                patch.object(self.window.snapshotWidget, 'error') as error:
+            self.capture()
+        error.assert_called_once_with('disk full')
+        self.assertTrue(self.window.snapshotWidget.captureButton.isEnabled())
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_close_waits_for_background_save_without_blocking(self):
+        release = threading.Event()
+        def delayed_save(*args):
+            release.wait(5)
+            return save_snapshot(*args)
+        with patch('qspectrumanalyzer.snapshots.save_snapshot', side_effect=delayed_save):
+            try:
+                self.window.capture_snapshot()
+                self.window.close()
+                self.assertTrue(self.window.isVisible())
+                self.assertTrue(self.window.snapshot_close_pending)
+            finally:
+                release.set()
+                self.wait_for_capture()
+        self.assertFalse(self.window.isVisible())
+        self.assertEqual(len(list(self.directory.glob('*.npz'))), 1)
+
+    def test_missing_backend_does_not_start_worker_or_clear_graph(self):
+        QtCore.QSettings().setValue('executable', '/missing/backend-executable')
+        with patch.object(QtWidgets.QMessageBox, 'warning') as warning, \
+                patch.object(self.window.power_thread, 'start') as start:
+            self.window.start()
+        warning.assert_called_once()
+        start.assert_not_called()
+        np.testing.assert_array_equal(self.plot.curve_average.getData()[1], self.y)
+
     def test_name_edit_persists_without_changing_data_or_image(self):
         path = self.capture()
         image = path.with_suffix('.png').read_bytes()
         panel = self.window.snapshotWidget
         panel.table.item(0, 0).setText('  Эфир вечером  ')
+        self.wait_for_load()
         snapshot = read_snapshot(path)
         self.assertEqual(snapshot['name'], 'Эфир вечером')
         np.testing.assert_array_equal(snapshot['curves'][0]['x'], self.x)
@@ -102,8 +326,10 @@ class SnapshotTests(unittest.TestCase):
         panel.refresh_list()
         self.assertEqual(panel.table.item(0, 0).text(), 'Эфир вечером')
         panel.displayCheckBox.setChecked(True)
+        self.wait_for_load()
         self.assertEqual(self.plot.snapshot_curves[0].name(), 'Эфир вечером: Average')
         panel.table.item(0, 0).setText('')
+        self.wait_for_load()
         self.assertEqual(read_snapshot(path)['name'], '')
 
     def test_failed_rename_keeps_original_snapshot_and_table_name(self):
@@ -113,6 +339,7 @@ class SnapshotTests(unittest.TestCase):
         with patch('qspectrumanalyzer.snapshots.os.replace', side_effect=OSError('read only')), \
                 patch.object(panel, 'error') as error:
             panel.table.item(0, 0).setText('New name')
+            self.wait_for_load()
         error.assert_called_once()
         self.assertEqual(panel.table.item(0, 0).text(), '')
         self.assertEqual(path.read_bytes(), before)

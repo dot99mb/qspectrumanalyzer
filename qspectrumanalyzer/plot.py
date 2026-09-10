@@ -363,12 +363,18 @@ class WaterfallPlotWidget:
         self.visible_history_size = 0
         self.frequency_start = None
         self.frequency_stop = None
+        self.snapshot_plot = None
+        self.snapshot_image = None
+        self.snapshot_frequency_range = None
+        self.image_frequencies = None
+        self.image_frequency_range = None
 
         self.create_plot()
 
     def set_enabled(self, enabled):
         self.enabled = enabled
         if not enabled:
+            self.display_snapshot(None)
             if hasattr(self, "waterfallImg"):
                 if self.histogram_layout:
                     try:
@@ -381,6 +387,55 @@ class WaterfallPlotWidget:
                 self.waterfallImg.clear()
                 del self.waterfallImg
             self.clear_plot()
+
+    def snapshot_data(self):
+        if not self.enabled or self.visible_history_size == 0 or self.image_frequencies is None:
+            raise ValueError('Enable the waterfall and collect data before capturing it')
+        image = self.waterfallImg
+        levels = image.getLevels()
+        if levels is None:
+            levels = [float(np.nanmin(image.image)), float(np.nanmax(image.image))]
+        lut = self.histogram.getLookupTable(n=256, alpha=True)
+        return dict(frequencies=self.image_frequencies.copy(), history=image.image.T.copy(),
+                    frequency_range=list(self.image_frequency_range),
+                    levels=np.asarray(levels).tolist(), lut=np.array(lut, dtype=np.uint8, copy=True))
+
+    def display_snapshot(self, snapshot):
+        if self.snapshot_plot is not None:
+            self.snapshot_plot.setXLink(None)
+            self.layout.removeItem(self.snapshot_plot)
+            self.snapshot_plot = None
+            self.snapshot_image = None
+        self.snapshot_frequency_range = None
+        if snapshot is None:
+            return
+        self.snapshot_frequency_range = snapshot['frequency_range']
+        plot = self.layout.addPlot(row=1, col=0)
+        self.snapshot_plot = plot
+        plot.setLabel('bottom', 'Frequency', units='Hz')
+        plot.setLabel('left', 'Saved sweeps')
+        plot.getAxis('left').setWidth(80)
+        plot.setTitle(snapshot.get('name') or 'Waterfall snapshot')
+        plot.setMouseEnabled(y=False)
+        image = pg.ImageItem(axisOrder='col-major', autoDownsample=True)
+        self.snapshot_image = image
+        image.setLookupTable(snapshot['lut'])
+        pixels = snapshot.get('display_image')
+        if pixels is None:
+            pixels = snapshot['history']
+            levels = snapshot['levels']
+        else:
+            levels = [0, 255]
+        image.setImage(pixels.T, levels=levels, autoLevels=False)
+        rows, bins = pixels.shape
+        start, stop = snapshot['frequency_range']
+        transform = QtGui.QTransform()
+        transform.translate(start, -rows)
+        transform.scale((stop - start) / bins, 1)
+        image.setTransform(transform)
+        plot.addItem(image)
+        plot.setYRange(*snapshot['view_range'][1], padding=0)
+        plot.setXLink(self.plot)
 
     def create_plot(self):
         """Create waterfall plot"""
@@ -403,8 +458,17 @@ class WaterfallPlotWidget:
             self.histogram = pg.HistogramLUTItem()
             self.histogram_layout.addItem(self.histogram)
             self.histogram.gradient.loadPreset("flame")
+            self.default_levels_state = self.histogram.saveState()
             #self.histogram.setHistogramRange(-50, 0)
             #self.histogram.setLevels(-50, 0)
+
+    def reset_levels(self):
+        """Restore the initial palette and automatic levels for current data."""
+        if not self.histogram_layout:
+            return
+        self.histogram.restoreState(self.default_levels_state)
+        self.histogram.imageChanged(autoLevel=True)
+        self.histogram.autoHistogramRange()
 
     def lock_y_range(self):
         """Keep waterfall Y axis in history rows, never in power values."""
@@ -473,6 +537,8 @@ class WaterfallPlotWidget:
         """Clear waterfall plot"""
         self.counter = 0
         self.visible_history_size = 0
+        self.image_frequencies = None
+        self.image_frequency_range = None
 
     def recalculate_plot(self, data_storage):
         """Recalculate waterfall plot"""
@@ -512,6 +578,8 @@ class WaterfallPlotWidget:
 
         self.waterfallImg.setImage(history.T, autoLevels=False, autoRange=False)
         freq_start, freq_width = self.get_frequency_rect(x, bins)
+        self.image_frequencies = x.copy()
+        self.image_frequency_range = (freq_start, freq_start + freq_width)
 
         self.visible_history_size = visible_size
         self.set_image_transform(freq_start, freq_width, visible_size, bins)
