@@ -7,6 +7,8 @@ hackrf_sweep, rtl_power, rx_power and other backends)
 Documentation
 -------------
 
+- `Руководство пользователя: функции и настройки программы
+  <docs/USER_GUIDE_RU.md>`_
 - `Установка в Ubuntu 26.04: HackRF, RTL-SDR и PlutoSDR
   <docs/INSTALL_UBUNTU_26_RU.md>`_
 
