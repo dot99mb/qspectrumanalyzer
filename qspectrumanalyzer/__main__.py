@@ -18,6 +18,7 @@ from qspectrumanalyzer.persistence import QSpectrumAnalyzerPersistence
 from qspectrumanalyzer.colors import QSpectrumAnalyzerColors
 from qspectrumanalyzer.baseline import QSpectrumAnalyzerBaseline
 from qspectrumanalyzer.peaks import PeakListWidget
+from qspectrumanalyzer.recording import RecordingWidget
 
 from qspectrumanalyzer.ui_qspectrumanalyzer import Ui_QSpectrumAnalyzerMainWindow
 
@@ -53,7 +54,11 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
         self.install_shared_view_all_actions()
         self.create_peaks_dock()
+        self.create_recording_dock()
         self.create_view_menu()
+        self.analysis_window = None
+        self.actionAnalyzeRecording = self.menu_File.addAction(self.tr("Analyze recording..."))
+        self.actionAnalyzeRecording.triggered.connect(self.open_recording_analysis)
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -94,6 +99,23 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.peak_update_timer.timeout.connect(self.refresh_peak_frequencies_if_dirty)
         self.set_peak_refresh_interval(self.peakListWidget.refreshIntervalSpinBox.value())
 
+    def open_recording_analysis(self):
+        from qspectrumanalyzer.analysis import RecordingAnalysisWindow
+        if self.analysis_window is None:
+            self.analysis_window = RecordingAnalysisWindow(self)
+        self.analysis_window.show()
+        self.analysis_window.raise_()
+        self.analysis_window.activateWindow()
+
+    def create_recording_dock(self):
+        self.recordingDockWidget = QtWidgets.QDockWidget(self.tr("CSV recording"), self)
+        self.recordingDockWidget.setObjectName("recordingDockWidget")
+        self.recordingWidget = RecordingWidget(self.recordingDockWidget)
+        self.recordingDockWidget.setWidget(self.recordingWidget)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.recordingDockWidget)
+        self.tabifyDockWidget(self.peaksDockWidget, self.recordingDockWidget)
+        self.peaksDockWidget.raise_()
+
     def create_view_menu(self):
         """Create actions for closing and reopening dock panels."""
         self.menu_View = QtWidgets.QMenu(self.tr("&View"), self.menubar)
@@ -106,6 +128,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.settingsDockWidget,
             self.levelsDockWidget,
             self.peaksDockWidget,
+            self.recordingDockWidget,
         )
         for dock in self.dock_widgets:
             dock.setFeatures(dock.features() | QtWidgets.QDockWidget.DockWidgetClosable)
@@ -114,6 +137,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.menu_View.addAction(action)
 
         self.menu_View.addSeparator()
+        self.actionWaterfall = self.menu_View.addAction(self.tr("Waterfall"))
+        self.actionWaterfall.setCheckable(True)
+        self.actionWaterfall.setChecked(True)
+        self.actionWaterfall.toggled.connect(self.set_waterfall_enabled)
         self.actionShowAllPanels = self.menu_View.addAction(self.tr("Show All Panels"))
         self.actionShowAllPanels.triggered.connect(self.show_all_dock_panels)
 
@@ -121,7 +148,41 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     def show_all_dock_panels(self):
         """Show every dock panel after one or more of them were closed."""
         for dock in self.dock_widgets:
-            dock.show()
+            if dock is not self.levelsDockWidget or self.actionWaterfall.isChecked():
+                dock.show()
+
+    def update_history_retention(self):
+        if self.data_storage is None:
+            return
+        enabled = self.actionWaterfall.isChecked()
+        settings = QtCore.QSettings()
+        size = settings.value("waterfall_history_size", 100, int) if enabled else 1
+        if self.persistenceCheckBox.isChecked():
+            size = max(size, settings.value("persistence_length", 5, int) + 1)
+        self.data_storage.configure_history(size, enabled)
+
+    def history_retention_updated(self, storage):
+        if storage is not self.data_storage:
+            return
+        if storage.y is not None:
+            # Release any curve reference to a row of the old large history.
+            self.spectrumPlotWidget.update_plot(storage, force=True)
+        self.spectrumPlotWidget.clear_persistence()
+        if self.persistenceCheckBox.isChecked() and storage.history is not None:
+            self.spectrumPlotWidget.recalculate_persistence(storage)
+
+    def set_waterfall_enabled(self, enabled):
+        self.waterfallPlotWidget.set_enabled(enabled)
+        self.waterfallPlotLayout.setVisible(enabled)
+        self.levelsDockWidget.setVisible(enabled)
+        self.levelsDockWidget.toggleViewAction().setEnabled(enabled)
+        self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot if enabled else None)
+        self.update_history_retention()
+        QtCore.QSettings().setValue("waterfall_enabled", int(enabled))
+        if enabled:
+            self.ensure_plot_splitter_visible()
+            if self.data_storage is not None:
+                self.waterfallPlotWidget.recalculate_plot(self.data_storage)
 
     def install_shared_view_all_actions(self):
         """Make every View All path use one range for spectrum and waterfall"""
@@ -141,7 +202,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         spectrum_view = self.spectrumPlotWidget.plot.getViewBox()
 
         def restore_x_link():
-            self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
+            if self.actionWaterfall.isChecked():
+                self.spectrumPlotWidget.plot.setXLink(self.waterfallPlotWidget.plot)
 
         spectrum_view.linkView(spectrum_view.XAxis, None)
 
@@ -188,6 +250,9 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         settings = QtCore.QSettings()
         self.data_storage = DataStorage(max_history_size=settings.value("waterfall_history_size", 100, int))
+        self.data_storage.history_resized.connect(self.history_retention_updated)
+        self.update_history_retention()
+        self.data_storage.recording_frame_ready.connect(self.recordingWidget.record_frame)
         self.data_storage.data_updated.connect(self.update_data)
         self.data_storage.data_updated.connect(self.spectrumPlotWidget.update_plot)
         self.data_storage.data_updated.connect(self.spectrumPlotWidget.update_persistence)
@@ -306,6 +371,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.restoreState(settings.value("window_state"))
         if settings.value("plotsplitter_state"):
             self.plotSplitter.restoreState(settings.value("plotsplitter_state"))
+        self.actionWaterfall.setChecked(bool(settings.value("waterfall_enabled", 1, int)))
 
         # Migration from older version of config file
         if settings.value("config_version", 1, int) < 2:
@@ -327,6 +393,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
     def ensure_plot_splitter_visible(self):
         """Prevent restored splitter state from hiding one of the plots"""
+        if not self.actionWaterfall.isChecked():
+            return
         sizes = self.plotSplitter.sizes()
         if not sizes or all(size > 0 for size in sizes):
             return
@@ -630,6 +698,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     @QtCore.Slot(bool)
     def on_persistenceCheckBox_toggled(self, checked):
         self.spectrumPlotWidget.persistence = checked
+        self.update_history_retention()
         if self.spectrumPlotWidget.persistence_curves[0].xData is None:
             self.spectrumPlotWidget.recalculate_persistence(self.data_storage)
         for curve in self.spectrumPlotWidget.persistence_curves:
@@ -689,6 +758,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             persistence_length = settings.value("persistence_length", 5, int)
             self.spectrumPlotWidget.persistence_length = persistence_length
             self.spectrumPlotWidget.persistence_decay = settings.value("persistence_decay", "exponential")
+            self.update_history_retention()
 
             # If only decay function has been changed, just reset colors
             if persistence_length == prev_persistence_length:
@@ -727,6 +797,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     def closeEvent(self, event):
         """Save settings when main window is closed"""
         self.stop()
+        if self.analysis_window is not None:
+            self.analysis_window.close()
+        self.recordingWidget.stop_recording()
+        self.recordingWidget.save_settings()
         self.save_settings()
 
 

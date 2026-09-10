@@ -290,6 +290,7 @@ class SpectrumPlotWidget:
 class WaterfallPlotWidget:
     """Waterfall plot"""
     def __init__(self, layout, histogram_layout=None):
+        self.enabled = True
         if not isinstance(layout, pg.GraphicsLayoutWidget):
             raise ValueError("layout must be instance of pyqtgraph.GraphicsLayoutWidget")
 
@@ -306,6 +307,22 @@ class WaterfallPlotWidget:
         self.frequency_stop = None
 
         self.create_plot()
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+        if not enabled:
+            if hasattr(self, "waterfallImg"):
+                if self.histogram_layout:
+                    try:
+                        self.waterfallImg.sigImageChanged.disconnect(self.histogram.imageChanged)
+                    except (TypeError, RuntimeError):
+                        pass
+                    self.histogram.imageItem = lambda: None
+                    self.histogram.plot.setData([], [])
+                self.plot.removeItem(self.waterfallImg)
+                self.waterfallImg.clear()
+                del self.waterfallImg
+            self.clear_plot()
 
     def create_plot(self):
         """Create waterfall plot"""
@@ -377,6 +394,8 @@ class WaterfallPlotWidget:
 
     def update_plot(self, data_storage):
         """Update waterfall plot"""
+        if not self.enabled:
+            return
         self.counter += 1
 
         # Create waterfall image on first run
@@ -399,7 +418,7 @@ class WaterfallPlotWidget:
 
     def recalculate_plot(self, data_storage):
         """Recalculate waterfall plot"""
-        if data_storage.x is None:
+        if not self.enabled or data_storage.x is None:
             return
 
         if not hasattr(self, "waterfallImg"):
@@ -413,7 +432,7 @@ class WaterfallPlotWidget:
 
     def set_image_data(self, data_storage):
         """Update waterfall image data and geometry"""
-        if data_storage.x is None or data_storage.history is None:
+        if not self.enabled or data_storage.x is None or data_storage.history is None:
             return
 
         history = data_storage.history.get_buffer()
@@ -442,6 +461,8 @@ class WaterfallPlotWidget:
 
     def view_all(self, start_freq, stop_freq):
         """Show full configured waterfall frequency and history range"""
+        if not self.enabled:
+            return
         self.lock_y_range()
         visible_size = max(1, self.visible_history_size)
         if hasattr(self, "waterfallImg"):

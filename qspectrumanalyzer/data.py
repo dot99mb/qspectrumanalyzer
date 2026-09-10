@@ -21,7 +21,8 @@ class HistoryBuffer:
         self.counter += 1
         if self.history_size < self.max_history_size:
             self.history_size += 1
-        self.buffer = np.roll(self.buffer, -1, axis=0)
+        if self.max_history_size > 1:
+            self.buffer = np.roll(self.buffer, -1, axis=0)
         self.buffer[-1] = data
 
     def get_buffer(self):
@@ -59,7 +60,9 @@ class Task(QtCore.QRunnable):
 class DataStorage(QtCore.QObject):
     """Data storage for spectrum measurements"""
     history_updated = QtCore.Signal(object)
+    history_resized = QtCore.Signal(object)
     data_updated = QtCore.Signal(object)
+    recording_frame_ready = QtCore.Signal(object)
     history_recalculated = QtCore.Signal(object)
     data_recalculated = QtCore.Signal(object)
     average_updated = QtCore.Signal(object)
@@ -70,6 +73,7 @@ class DataStorage(QtCore.QObject):
     def __init__(self, max_history_size=100, parent=None):
         super().__init__(parent)
         self.max_history_size = max_history_size
+        self.emit_history_updates = True
         self.smooth = False
         self.smooth_length = 11
         self.smooth_window = "hanning"
@@ -119,6 +123,27 @@ class DataStorage(QtCore.QObject):
         self.frequency_stop = max(start_freq, stop_freq)
         self.frequency_axis_warning_shown = False
 
+    def configure_history(self, size, emit_updates):
+        """Serialize retention changes with acquisition/processing tasks."""
+        self.start_task(self._configure_history, max(1, int(size)), bool(emit_updates))
+
+    def _configure_history(self, size, emit_updates):
+        self.emit_history_updates = emit_updates
+        self.max_history_size = size
+        if self.history is not None and self.history.max_history_size != size:
+            old = self.history
+            recent = old.get_buffer()[-size:]
+            resized = HistoryBuffer(old.data_size, size)
+            resized.history_size = len(recent)
+            resized.counter = old.counter
+            if len(recent):
+                resized.buffer[-len(recent):] = recent
+            # Recalculation can leave the current spectrum referencing history.
+            if self.y is not None and np.shares_memory(self.y, old.buffer):
+                self.y = self.y.copy()
+            self.history = resized
+        self.history_resized.emit(self)
+
     def normalize_frequency_axis(self, data):
         """Build x-axis bin centers from the configured sweep range."""
         if self.frequency_start is None or self.frequency_stop is None:
@@ -152,6 +177,9 @@ class DataStorage(QtCore.QObject):
 
     def update(self, data):
         """Update data storage"""
+        data = data.copy()
+        data["recording_time"] = (time.time(), time.monotonic())
+        data["recording_range"] = (self.frequency_start, self.frequency_stop)
         data = self.normalize_frequency_axis(data)
 
         if self.y is not None and len(data["y"]) != len(self.y):
@@ -177,6 +205,12 @@ class DataStorage(QtCore.QObject):
             data["y"] = self.smooth_data(data["y"])
 
         self.y = data["y"]
+        wall_time, monotonic_time = data["recording_time"]
+        # GUI notifications otherwise carry this mutable storage object. CSV
+        # needs a distinct snapshot of every sweep, even when GUI delivery lags.
+        self.recording_frame_ready.emit((np.array(self.x, copy=True),
+                                         self.y.copy(), wall_time, monotonic_time,
+                                         data["recording_range"]))
         self.data_updated.emit(self)
 
         self.start_task(self.update_average, data)
@@ -189,7 +223,8 @@ class DataStorage(QtCore.QObject):
             self.history = HistoryBuffer(len(data["y"]), self.max_history_size)
 
         self.history.append(data["y"])
-        self.history_updated.emit(self)
+        if self.emit_history_updates:
+            self.history_updated.emit(self)
 
     def update_average(self, data):
         """Update average data"""
@@ -285,7 +320,7 @@ class DataStorage(QtCore.QObject):
         history = self.history.get_buffer()
         if self.smooth:
             self.y = self.smooth_data(history[-1])
-            self.average_counter = 0
+            self.average_counter = 1
             self.average = self.y.copy()
             self.peak_hold_max = self.y.copy()
             self.peak_hold_min = self.y.copy()
