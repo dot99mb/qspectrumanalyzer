@@ -33,6 +33,7 @@ class SpectrumPlotWidget:
         self.trigger_level_callback = None
         self.snapshot_curves = []
         self.snapshot_legend = None
+        self.snapshot_plot = None
         if not isinstance(layout, pg.GraphicsLayoutWidget):
             raise ValueError("layout must be instance of pyqtgraph.GraphicsLayoutWidget")
 
@@ -94,7 +95,6 @@ class SpectrumPlotWidget:
                       ('Max hold', self.curve_peak_hold_max), ('Min hold', self.curve_peak_hold_min),
                       ('Baseline', self.curve_baseline)]
         candidates.extend(('Persistence {}'.format(i + 1), curve) for i, curve in enumerate(self.persistence_curves))
-        candidates.extend(('Snapshot {}'.format(i + 1), curve) for i, curve in enumerate(self.snapshot_curves))
         result = []
         for name, curve in candidates:
             x, y = curve.getOriginalDataset()
@@ -105,27 +105,50 @@ class SpectrumPlotWidget:
         return result
 
     def display_snapshot(self, snapshot):
-        for curve in self.snapshot_curves:
-            self.plot.removeItem(curve)
+        live_x_range = list(self.plot.viewRange()[0])
+        if self.snapshot_plot is not None:
+            self.snapshot_plot.setXLink(None)
+            self.layout.removeItem(self.snapshot_plot)
+            self.snapshot_plot = None
         self.snapshot_curves = []
-        if self.snapshot_legend is not None:
-            self.snapshot_legend.clear()
+        self.snapshot_legend = None
         if snapshot is None:
             return
-        if self.snapshot_legend is None:
-            self.snapshot_legend = self.plot.addLegend(offset=(10, 10))
+        self.snapshot_plot = self.layout.addPlot(row=2, col=0)
+        self.snapshot_plot.setLabel('left', 'Power', units='dB')
+        self.snapshot_plot.setLabel('bottom', 'Frequency', units='Hz')
+        self.snapshot_plot.getAxis('left').setWidth(80)
+        self.snapshot_plot.showGrid(x=True, y=True)
+        self.snapshot_plot.setTitle(snapshot.get('name') or 'Spectrum snapshot')
+        self.snapshot_plot.enableAutoRange(x=False, y=False)
+        self.snapshot_plot.setXRange(*live_x_range, padding=0)
+        self.snapshot_plot.setYRange(*snapshot['view_range'][1], padding=0)
+        self.snapshot_legend = self.snapshot_plot.addLegend(offset=(10, 10))
         for record in snapshot['curves']:
             # Thick antialiased dashed paths can block Qt's raster painter for
             # seconds on full sweeps. Reduce only display data, preserving peaks
             # and the original arrays for zooming and subsequent snapshots.
             pen = pg.mkPen(tuple(record['color']), width=1)
-            curve = self.plot.plot(record['x'], record['y'], pen=pen,
+            curve = self.snapshot_plot.plot(record['x'], record['y'], pen=pen,
                                    antialias=False,
                                    name=(snapshot.get('name') or 'Snapshot') + ': ' + record['name'])
             curve.setDownsampling(auto=True, method='peak')
             curve.setClipToView(True)
             curve.setZValue(950)
+            curve.snapshot_source_name = record['name']
             self.snapshot_curves.append(curve)
+        self.snapshot_plot.setXLink(self.plot)
+        self.plot.setXRange(*live_x_range, padding=0)
+
+    def rename_snapshot_display(self, name):
+        if self.snapshot_legend is None:
+            return
+        self.snapshot_plot.setTitle(name or 'Spectrum snapshot')
+        self.snapshot_legend.clear()
+        for curve in self.snapshot_curves:
+            label = (name or 'Snapshot') + ': ' + curve.snapshot_source_name
+            curve.opts['name'] = label
+            self.snapshot_legend.addItem(curve, label)
 
     def create_main_curve(self):
         """Create main spectrum curve"""

@@ -140,7 +140,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.peaksDockWidget.raise_()
 
     def create_snapshots_dock(self):
-        self.snapshot_previous_range = None
+        self.displayed_snapshot_paths = {}
         self.snapshot_save_thread = None
         self.snapshot_close_pending = False
         self.snapshotsDockWidget = QtWidgets.QDockWidget(self.tr("Spectrum snapshots"), self)
@@ -149,12 +149,41 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.snapshotWidget.capture_requested.connect(self.capture_snapshot)
         self.snapshotWidget.display_requested.connect(self.display_snapshot)
         self.snapshotWidget.loading_finished.connect(self.snapshot_loading_finished)
+        self.snapshotWidget.snapshot_renamed.connect(self.rename_snapshot_display)
+        self.snapshotWidget.range_requested.connect(self.apply_snapshot_range)
         self.snapshotsDockWidget.setWidget(self.snapshotWidget)
         self.addDockWidget(QtCore.Qt.DockWidgetArea(2), self.snapshotsDockWidget)
         self.tabifyDockWidget(self.peaksDockWidget, self.snapshotsDockWidget)
         self.peaksDockWidget.raise_()
         self.startFreqSpinBox.valueChanged.connect(self.validate_waterfall_snapshot_range)
         self.stopFreqSpinBox.valueChanged.connect(self.validate_waterfall_snapshot_range)
+
+    def apply_snapshot_range(self, frequencies):
+        if frequencies is None:
+            return
+        start, stop = (float(value) / 1e6 for value in frequencies)
+        if not (self.startFreqSpinBox.minimum() <= start <= self.startFreqSpinBox.maximum()
+                and self.stopFreqSpinBox.minimum() <= stop <= self.stopFreqSpinBox.maximum()
+                and start < stop):
+            self.snapshotWidget.error('Snapshot frequency range is not supported by the selected backend')
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, self.tr('Apply snapshot range'),
+            self.tr('Stop scanning if running and set the frequency range to {:.6f}–{:.6f} MHz?').format(start, stop),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        self.stop()
+        self.snapshotWidget.displayCheckBox.setChecked(False)
+        self.snapshotWidget.cancel_loading()
+        # Apply the two bounds together, without validating an intermediate range.
+        self.startFreqSpinBox.blockSignals(True)
+        self.stopFreqSpinBox.blockSignals(True)
+        self.startFreqSpinBox.setValue(start)
+        self.stopFreqSpinBox.setValue(stop)
+        self.startFreqSpinBox.blockSignals(False)
+        self.stopFreqSpinBox.blockSignals(False)
+        self.fit_frequency_range()
 
     def capture_snapshot(self):
         panel = self.snapshotWidget
@@ -176,7 +205,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
                 if not curves:
                     raise ValueError("No visible spectrum data to capture")
                 plot = self.spectrumPlotWidget.plot
-                image = self.mainPlotLayout.grab().toImage()
+                rect = self.mainPlotLayout.mapFromScene(plot.sceneBoundingRect()).boundingRect()
+                image = self.mainPlotLayout.grab(rect).toImage()
             QtCore.QSettings().setValue("snapshots/directory", directory)
             self.snapshot_save_thread = SnapshotSaveThread(
                 directory, curves, plot.viewRange(), image, waterfall, parent=self)
@@ -191,6 +221,13 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     def snapshot_loading_finished(self):
         if self.snapshot_close_pending:
             self.close()
+
+    def rename_snapshot_display(self, path, name):
+        if self.displayed_snapshot_paths.get('spectrum') == path:
+            self.spectrumPlotWidget.rename_snapshot_display(name)
+        plot = self.waterfallPlotWidget.snapshot_plot
+        if plot is not None and self.displayed_snapshot_paths.get('waterfall') == path:
+            plot.setTitle(name or 'Waterfall snapshot')
 
     @QtCore.Slot()
     def snapshot_save_finished(self):
@@ -210,27 +247,22 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.close()
 
     def display_snapshot(self, snapshot):
-        self.waterfallPlotWidget.display_snapshot(None)
-        if snapshot is not None and snapshot.get('kind') == 'waterfall':
-            self.display_snapshot(None)
+        if snapshot is None:
+            self.spectrumPlotWidget.display_snapshot(None)
+            self.waterfallPlotWidget.display_snapshot(None)
+            self.displayed_snapshot_paths.clear()
+            return
+        kind = snapshot.get('kind', 'spectrum')
+        if kind == 'waterfall':
             if not self.waterfallPlotWidget.enabled:
-                self.reject_waterfall_snapshot('Enable the current waterfall before displaying a saved waterfall')
                 return
             if not self.waterfall_ranges_match(snapshot['frequency_range']):
                 self.reject_waterfall_snapshot(self.waterfall_range_error(snapshot['frequency_range']))
                 return
             self.waterfallPlotWidget.display_snapshot(snapshot)
-            return
-        plot = self.spectrumPlotWidget.plot
-        if snapshot is not None and self.snapshot_previous_range is None:
-            self.snapshot_previous_range = plot.viewRange()
-        self.spectrumPlotWidget.display_snapshot(snapshot)
-        ranges = snapshot['view_range'] if snapshot is not None else self.snapshot_previous_range
-        if ranges is not None:
-            plot.setXRange(*ranges[0], padding=0)
-            plot.setYRange(*ranges[1], padding=0)
-        if snapshot is None:
-            self.snapshot_previous_range = None
+        else:
+            self.spectrumPlotWidget.display_snapshot(snapshot)
+        self.displayed_snapshot_paths[kind] = self.snapshotWidget.selected_path()
 
     def waterfall_ranges_match(self, saved):
         current = sorted((self.startFreqSpinBox.value() * 1e6, self.stopFreqSpinBox.value() * 1e6))
@@ -246,7 +278,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
                     self.startFreqSpinBox.value(), self.stopFreqSpinBox.value())
 
     def reject_waterfall_snapshot(self, message):
-        self.snapshotWidget.displayCheckBox.setChecked(False)
+        self.waterfallPlotWidget.display_snapshot(None)
+        self.displayed_snapshot_paths.pop('waterfall', None)
+        if self.spectrumPlotWidget.snapshot_plot is None:
+            self.snapshotWidget.displayCheckBox.setChecked(False)
         self.snapshotWidget.error(message)
 
     def validate_waterfall_snapshot_range(self, *args):
@@ -312,8 +347,11 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.spectrumPlotWidget.recalculate_persistence(storage)
 
     def set_waterfall_enabled(self, enabled):
+        self.snapshotWidget.set_waterfall_visible(enabled)
         if not enabled and self.waterfallPlotWidget.snapshot_plot is not None:
-            self.snapshotWidget.displayCheckBox.setChecked(False)
+            self.displayed_snapshot_paths.pop('waterfall', None)
+            if self.spectrumPlotWidget.snapshot_plot is None:
+                self.snapshotWidget.displayCheckBox.setChecked(False)
         self.waterfallPlotWidget.set_enabled(enabled)
         self.waterfallPlotLayout.setVisible(enabled)
         self.levelsDockWidget.setVisible(enabled)
@@ -984,7 +1022,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
     def closeEvent(self, event):
         """Save settings when main window is closed"""
-        if self.snapshot_save_thread is not None or self.snapshotWidget.load_thread is not None:
+        if (self.snapshot_save_thread is not None or self.snapshotWidget.load_thread is not None
+                or self.snapshotWidget.rename_thread is not None):
             self.snapshot_close_pending = True
             self.snapshotWidget.cancel_loading()
             self.stop()

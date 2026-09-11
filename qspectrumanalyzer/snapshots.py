@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from zipfile import BadZipFile, ZipFile
 import io
+import shutil
 
 import numpy as np
 from Qt import QtCore, QtGui, QtWidgets
@@ -28,7 +29,11 @@ def rename_snapshot(path, name):
     try:
         with ZipFile(path) as source, ZipFile(temporary, 'w') as target:
             for entry in source.infolist():
-                target.writestr(entry, buffer.getvalue() if entry.filename == 'metadata.npy' else source.read(entry))
+                if entry.filename == 'metadata.npy':
+                    target.writestr(entry, buffer.getvalue())
+                else:
+                    with source.open(entry) as incoming, target.open(entry, 'w', force_zip64=True) as outgoing:
+                        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -184,10 +189,27 @@ class SnapshotLoadThread(QtCore.QThread):
             self.snapshot = None
 
 
+class SnapshotRenameThread(QtCore.QThread):
+    def __init__(self, path, name, parent=None):
+        super().__init__(parent)
+        self.path, self.name = path, name
+        self.previous = None
+        self.error = None
+
+    def run(self):
+        try:
+            self.previous = read_snapshot(self.path, metadata_only=True).get('name', '')
+            rename_snapshot(self.path, self.name)
+        except Exception as error:
+            self.error = str(error)
+
+
 class SnapshotWidget(QtWidgets.QWidget):
     capture_requested = QtCore.Signal()
     display_requested = QtCore.Signal(object)
     loading_finished = QtCore.Signal()
+    snapshot_renamed = QtCore.Signal(object, str)
+    range_requested = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -195,6 +217,10 @@ class SnapshotWidget(QtWidgets.QWidget):
         self.load_thread = None
         self.pending_path = None
         self.load_generation = 0
+        self.waterfall_visible = True
+        self.pending_kind = None
+        self.rename_thread = None
+        self.rename_queue = {}
         layout = QtWidgets.QVBoxLayout(self)
         directory_row = QtWidgets.QHBoxLayout()
         directory_row.addWidget(QtWidgets.QLabel('Directory:'))
@@ -230,7 +256,8 @@ class SnapshotWidget(QtWidgets.QWidget):
         self.table.setHorizontalHeaderLabels(['Name', 'Captured', 'Range [MHz]', 'Curves', 'Type'])
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditKeyPressed)
+        self.table.cellDoubleClicked.connect(self.request_snapshot_range)
         self.table.itemChanged.connect(self.rename_item)
         self.table.setMouseTracking(True)
         self.table.cellEntered.connect(self.preview_row)
@@ -267,21 +294,52 @@ class SnapshotWidget(QtWidgets.QWidget):
         item = self.table.item(self.table.currentRow(), 0)
         return Path(item.data(QtCore.Qt.UserRole)) if item is not None else None
 
+    def request_snapshot_range(self, row, column):
+        item = self.table.item(row, 0)
+        if item is not None:
+            self.range_requested.emit(item.data(QtCore.Qt.UserRole + 2))
+
     def rename_item(self, item):
         if item.column() != 0:
             return
-        previous = item.data(QtCore.Qt.UserRole + 1) or ''
         name = item.text().strip()
-        try:
-            rename_snapshot(item.data(QtCore.Qt.UserRole), name)
-        except (OSError, ValueError, KeyError, TypeError, BadZipFile, EOFError) as error:
-            name = previous
-            self.error(error)
+        path = Path(item.data(QtCore.Qt.UserRole))
+        self.rename_queue[path] = name
+        self.start_pending_rename()
+
+    def start_pending_rename(self):
+        if self.rename_thread is not None or not self.rename_queue:
+            return
+        path = next(iter(self.rename_queue))
+        name = self.rename_queue.pop(path)
+        self.rename_thread = SnapshotRenameThread(path, name, self)
+        self.rename_thread.finished.connect(self.rename_finished)
+        self.statusLabel.setText('Saving snapshot name…')
+        self.rename_thread.start()
+
+    @QtCore.Slot()
+    def rename_finished(self):
+        worker = self.rename_thread
+        self.rename_thread = None
+        name = worker.name if worker.error is None else worker.previous
         self.table.blockSignals(True)
-        item.setText(name)
-        item.setData(QtCore.Qt.UserRole + 1, name)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if Path(item.data(QtCore.Qt.UserRole)) == worker.path:
+                saved_name = name if name is not None else item.data(QtCore.Qt.UserRole + 1) or ''
+                item.setData(QtCore.Qt.UserRole + 1, saved_name)
+                if worker.path not in self.rename_queue:
+                    item.setText(saved_name)
+                break
         self.table.blockSignals(False)
-        self.display_selected()
+        if worker.error is not None:
+            self.error(worker.error)
+        else:
+            self.statusLabel.setText('Snapshot name saved')
+            self.snapshot_renamed.emit(worker.path, worker.name)
+        worker.deleteLater()
+        self.start_pending_rename()
+        self.loading_finished.emit()
 
     def refresh_list(self, selected=None):
         selected = Path(selected) if selected else self.selected_path()
@@ -315,10 +373,12 @@ class SnapshotWidget(QtWidgets.QWidget):
                 if col != 0:
                     item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEditable)
                 else:
-                    item.setToolTip('Double-click or press F2 to name this snapshot\n' + str(path))
+                    item.setToolTip('F2: edit name. Double-click: apply snapshot frequency range.\n' + str(path))
                     item.setData(QtCore.Qt.UserRole + 1, name)
                 self.table.setItem(row, col, item)
             self.table.item(row, 0).setData(QtCore.Qt.UserRole, str(path))
+            self.table.item(row, 0).setData(QtCore.Qt.UserRole + 2, (float(start), float(stop)))
+            self.table.item(row, 0).setData(QtCore.Qt.UserRole + 3, kind.lower())
             if path == selected:
                 selected_row = row
         self.table.setCurrentCell(-1, -1)
@@ -361,9 +421,16 @@ class SnapshotWidget(QtWidgets.QWidget):
 
     def display_selected(self, *args):
         path = self.selected_path()
+        item = self.table.item(self.table.currentRow(), 0)
+        self.pending_kind = item.data(QtCore.Qt.UserRole + 3) if item is not None else None
+        if self.displayCheckBox.isChecked() and self.pending_kind == 'waterfall' and not self.waterfall_visible:
+            self.cancel_loading()
+            self.statusLabel.setText('Waterfall is hidden')
+            return
         self.load_generation += 1
         self.pending_path = path if self.displayCheckBox.isChecked() else None
-        self.display_requested.emit(None)
+        if self.pending_path is None:
+            self.display_requested.emit(None)
         if self.load_thread is not None:
             self.load_thread.requestInterruption()
         if self.pending_path is not None:
@@ -394,6 +461,9 @@ class SnapshotWidget(QtWidgets.QWidget):
             if error is not None:
                 self.error(error)
             elif snapshot is not None:
+                item = self.table.item(self.table.currentRow(), 0)
+                if item is not None:
+                    snapshot['name'] = item.data(QtCore.Qt.UserRole + 1) or ''
                 self.statusLabel.setText('Snapshot loaded')
                 self.display_requested.emit(snapshot)
         else:
@@ -405,6 +475,12 @@ class SnapshotWidget(QtWidgets.QWidget):
         self.pending_path = None
         if self.load_thread is not None:
             self.load_thread.requestInterruption()
+
+    def set_waterfall_visible(self, visible):
+        self.waterfall_visible = visible
+        if not visible and self.pending_kind == 'waterfall':
+            self.cancel_loading()
+            self.statusLabel.setText('Waterfall is hidden')
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

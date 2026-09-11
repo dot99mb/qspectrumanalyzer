@@ -53,10 +53,11 @@ class SnapshotTests(unittest.TestCase):
 
     def wait_for_load(self):
         deadline = time.monotonic() + 10
-        while self.window.snapshotWidget.load_thread is not None and time.monotonic() < deadline:
+        while (self.window.snapshotWidget.load_thread is not None or self.window.snapshotWidget.rename_thread is not None) and time.monotonic() < deadline:
             self.app.processEvents()
             time.sleep(.005)
         self.assertIsNone(self.window.snapshotWidget.load_thread)
+        self.assertIsNone(self.window.snapshotWidget.rename_thread)
 
     def wait_for_capture(self):
         deadline = time.monotonic() + 10
@@ -197,6 +198,85 @@ class SnapshotTests(unittest.TestCase):
                 save_snapshot(self.directory, self.plot.snapshot_data(), self.plot.plot.viewRange(),
                               self.window.mainPlotLayout.grab())
         self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_hidden_waterfall_snapshot_selection_does_not_load_or_warn(self):
+        self.prepare_waterfall()
+        self.capture()
+        w = self.window
+        w.actionWaterfall.setChecked(False)
+        with patch('qspectrumanalyzer.snapshots.read_snapshot') as read, \
+                patch.object(w.snapshotWidget, 'error') as error:
+            w.snapshotWidget.displayCheckBox.setChecked(True)
+            w.snapshotWidget.display_selected()
+            self.app.processEvents()
+        read.assert_not_called()
+        error.assert_not_called()
+        self.assertIsNone(w.snapshotWidget.load_thread)
+        self.assertIsNone(w.waterfallPlotWidget.snapshot_plot)
+
+    def test_spectrum_and_waterfall_histories_are_independent(self):
+        spectrum_path = self.capture()
+        self.prepare_waterfall()
+        self.capture()
+        w = self.window
+        panel = w.snapshotWidget
+        panel.displayCheckBox.setChecked(True)
+        self.wait_for_load()
+        waterfall_plot = w.waterfallPlotWidget.snapshot_plot
+        for row in range(panel.table.rowCount()):
+            if Path(panel.table.item(row, 0).data(QtCore.Qt.UserRole)) == spectrum_path:
+                panel.table.selectRow(row)
+                break
+        self.wait_for_load()
+        self.assertIs(w.waterfallPlotWidget.snapshot_plot, waterfall_plot)
+        self.assertIsNotNone(self.plot.snapshot_plot)
+        self.assertIsNot(self.plot.snapshot_plot, self.plot.plot)
+        self.assertNotIn(self.plot.snapshot_curves[0], self.plot.plot.items)
+        live_range = self.plot.plot.viewRange()
+        panel.typeComboBox.setCurrentIndex(0)
+        self.capture()
+        self.assertIs(w.waterfallPlotWidget.snapshot_plot, waterfall_plot)
+        np.testing.assert_allclose(self.plot.plot.viewRange(), live_range)
+        spectrum_plot = self.plot.snapshot_plot
+        panel.typeComboBox.setCurrentIndex(1)
+        self.capture()
+        self.assertIs(self.plot.snapshot_plot, spectrum_plot)
+        self.assertIsNot(w.waterfallPlotWidget.snapshot_plot, waterfall_plot)
+        w.actionWaterfall.setChecked(False)
+        self.assertIs(self.plot.snapshot_plot, spectrum_plot)
+        self.assertIsNone(w.waterfallPlotWidget.snapshot_plot)
+        panel.displayCheckBox.setChecked(False)
+        self.assertIsNone(self.plot.snapshot_plot)
+
+    def test_double_click_applies_range_only_after_confirmation(self):
+        self.capture()
+        w = self.window
+        before = (w.startFreqSpinBox.value(), w.stopFreqSpinBox.value())
+        with patch.object(QtWidgets.QMessageBox, 'question', return_value=QtWidgets.QMessageBox.No), \
+                patch.object(w, 'stop') as stop:
+            w.snapshotWidget.table.cellDoubleClicked.emit(0, 0)
+        stop.assert_not_called()
+        self.assertEqual((w.startFreqSpinBox.value(), w.stopFreqSpinBox.value()), before)
+        def confirm(*args):
+            self.assertEqual((w.startFreqSpinBox.value(), w.stopFreqSpinBox.value()), before)
+            return QtWidgets.QMessageBox.Yes
+        with patch.object(QtWidgets.QMessageBox, 'question', side_effect=confirm), \
+                patch.object(w, 'stop') as stop:
+            w.snapshotWidget.table.cellDoubleClicked.emit(0, 2)
+        stop.assert_called_once()
+        self.assertEqual((w.startFreqSpinBox.value(), w.stopFreqSpinBox.value()), (100., 110.))
+        np.testing.assert_allclose(w.spectrumPlotWidget.plot.viewRange()[0], [100e6, 110e6], atol=1)
+        self.assertFalse(w.power_thread.alive)
+
+    def test_waterfall_double_click_uses_full_range_not_zoomed_view(self):
+        self.prepare_waterfall()
+        w = self.window
+        w.waterfallPlotWidget.plot.setXRange(102e6, 104e6, padding=0)
+        self.capture()
+        w.startFreqSpinBox.setValue(101)
+        with patch.object(QtWidgets.QMessageBox, 'question', return_value=QtWidgets.QMessageBox.Yes):
+            w.snapshotWidget.table.cellDoubleClicked.emit(0, 0)
+        self.assertEqual((w.startFreqSpinBox.value(), w.stopFreqSpinBox.value()), (100., 110.))
 
     def test_loading_is_responsive_and_latest_selection_wins(self):
         self.capture()
@@ -345,6 +425,37 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse(list(self.directory.glob('.snapshot-*')))
 
+    def test_rename_stays_responsive_preserves_display_and_queues_latest_name(self):
+        from qspectrumanalyzer.snapshots import rename_snapshot
+        path = self.capture()
+        panel = self.window.snapshotWidget
+        panel.displayCheckBox.setChecked(True)
+        self.wait_for_load()
+        curve = self.plot.snapshot_curves[0]
+        entered, release = threading.Event(), threading.Event()
+        def delayed_rename(*args):
+            entered.set()
+            release.wait(5)
+            return rename_snapshot(*args)
+        with patch('qspectrumanalyzer.snapshots.rename_snapshot', side_effect=delayed_rename), \
+                patch.object(panel, 'display_selected') as reload_snapshot:
+            try:
+                panel.table.item(0, 0).setText('First')
+                self.assertTrue(entered.wait(1))
+                ticks = []
+                QtCore.QTimer.singleShot(0, lambda: ticks.append(True))
+                self.app.processEvents()
+                self.assertEqual(ticks, [True])
+                panel.table.item(0, 0).setText('Latest')
+                self.assertIs(self.plot.snapshot_curves[0], curve)
+            finally:
+                release.set()
+                self.wait_for_load()
+            reload_snapshot.assert_not_called()
+        self.assertEqual(read_snapshot(path)['name'], 'Latest')
+        self.assertIs(self.plot.snapshot_curves[0], curve)
+        self.assertEqual(curve.name(), 'Latest: Average')
+
     def test_startup_migrates_layout_without_snapshot_dock(self):
         w = self.window
         dock = w.snapshotsDockWidget
@@ -376,7 +487,7 @@ class SnapshotTests(unittest.TestCase):
         y[55002] = -110.
         self.plot.curve_average.clear()
         self.plot.plot.setRange(xRange=(x[0], x[-1]), yRange=(-120, -30), padding=0)
-        self.plot.display_snapshot({'curves': [dict(name='Average', x=x, y=y,
+        self.plot.display_snapshot({'view_range': [[x[0], x[-1]], [-120, -30]], 'curves': [dict(name='Average', x=x, y=y,
                                                   color=[0, 255, 255, 255])]})
         self.app.processEvents()
         curve = self.plot.snapshot_curves[0]
@@ -387,10 +498,12 @@ class SnapshotTests(unittest.TestCase):
         self.plot.plot.setXRange(x[54950], x[55050], padding=0)
         self.app.processEvents()
         self.assertIn(x[55001], curve.getData()[0])
+        np.testing.assert_array_equal(curve.getOriginalDataset()[1], y)
+        self.plot.curve_average.setData(self.x, self.y)
         path = self.capture()
         saved = read_snapshot(path)['curves'][0]
-        np.testing.assert_array_equal(saved['x'], x)
-        np.testing.assert_array_equal(saved['y'], y)
+        np.testing.assert_array_equal(saved['x'], self.x)
+        np.testing.assert_array_equal(saved['y'], self.y)
 
     def test_corrupt_files_skipped_and_empty_plot_rejected(self):
         (self.directory / 'spectrum_broken.npz').write_bytes(b'PK\x03\x04broken')

@@ -1,4 +1,4 @@
-## Запуск через ретминал с активацией окружения
+## Запуск через терминал с активацией окружения
 
 ```
 source /home/dock/venv/qspectr/bin/activate
@@ -28,3 +28,22 @@ Terminal=true
 ```
 
 
+
+## Backend при запуске ярлыком
+
+Ярлык не активирует venv и не добавляет его `bin` в `PATH`. Для Soapy укажите
+в **File → Settings...**:
+
+```text
+Backend: soapy_power
+Executable: /home/dock/venv/qspectr/bin/soapy_power
+```
+
+Проверка установки:
+
+```bash
+env -u PYTHONPATH /home/dock/venv/qspectr/bin/soapy_power --help
+```
+
+Предупреждение об игнорировании Wayland само по себе не является ошибкой:
+данный ярлык явно использует X11/XWayland через `QT_QPA_PLATFORM=xcb`.
