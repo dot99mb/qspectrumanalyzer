@@ -22,6 +22,7 @@ from qspectrumanalyzer.baseline import QSpectrumAnalyzerBaseline
 from qspectrumanalyzer.peaks import PeakListWidget
 from qspectrumanalyzer.recording import RecordingWidget
 from qspectrumanalyzer.snapshots import SnapshotWidget, SnapshotSaveThread
+from qspectrumanalyzer.mobile_server import MobileServer, MobileServerDialog
 
 from qspectrumanalyzer.ui_qspectrumanalyzer import Ui_QSpectrumAnalyzerMainWindow
 
@@ -37,6 +38,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
     def __init__(self, parent=None):
         # Initialize UI
         super().__init__(parent)
+        self.mobile_server = None
         self.setupUi(self)
 
         # Set window icon
@@ -72,6 +74,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.analysis_window = None
         self.actionAnalyzeRecording = self.menu_File.addAction(self.tr("Analyze recording..."))
         self.actionAnalyzeRecording.triggered.connect(self.open_recording_analysis)
+        self.actionMobileServer = self.menu_File.addAction(self.tr('Mobile server...'))
+        self.actionMobileServer.triggered.connect(self.open_mobile_server)
 
         # Setup power thread and connect signals
         self.update_status_timer = QtCore.QTimer()
@@ -87,6 +91,24 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         self.update_buttons()
         self.load_settings()
+
+    def open_mobile_server(self):
+        dialog = MobileServerDialog(self)
+        dialog.exec_()
+
+    def start_mobile_server(self, host, port, token):
+        if self.mobile_server is not None:
+            raise ValueError('Mobile server is already running')
+        self.mobile_server = MobileServer(self, host, port, token)
+        self.update_history_retention()
+        self.show_status('Mobile server listening on {}:{}'.format(host, self.mobile_server.http.server_port))
+
+    def stop_mobile_server(self):
+        if self.mobile_server is not None:
+            self.mobile_server.stop()
+            self.mobile_server.deleteLater()
+            self.mobile_server = None
+            self.update_history_retention()
 
     def create_peaks_dock(self):
         """Create dock listing average spectrum peak frequencies."""
@@ -185,15 +207,17 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.stopFreqSpinBox.blockSignals(False)
         self.fit_frequency_range()
 
-    def capture_snapshot(self):
+    def capture_snapshot(self, kind=None, name="", remote=False):
         panel = self.snapshotWidget
         if self.snapshot_save_thread is not None:
+            if remote:
+                raise ValueError("Snapshot saving is already in progress")
             return
         try:
             directory = panel.directoryEdit.text()
             if not directory.strip():
                 raise ValueError("Select a snapshot directory")
-            if panel.typeComboBox.currentData() == 'waterfall':
+            if (kind or panel.typeComboBox.currentData()) == 'waterfall':
                 waterfall = self.waterfallPlotWidget.snapshot_data()
                 plot = self.waterfallPlotWidget.plot
                 rect = self.waterfallPlotLayout.mapFromScene(plot.sceneBoundingRect()).boundingRect()
@@ -209,12 +233,16 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
                 image = self.mainPlotLayout.grab(rect).toImage()
             QtCore.QSettings().setValue("snapshots/directory", directory)
             self.snapshot_save_thread = SnapshotSaveThread(
-                directory, curves, plot.viewRange(), image, waterfall, parent=self)
+                directory, curves, plot.viewRange(), image, waterfall, parent=self, name=name)
+            self.snapshot_save_thread.remote = remote
             self.snapshot_save_thread.finished.connect(self.snapshot_save_finished)
             panel.captureButton.setEnabled(False)
             panel.statusLabel.setText("Saving snapshot… Measurement can continue.")
             self.snapshot_save_thread.start()
+            return self.snapshot_save_thread
         except (OSError, ValueError) as error:
+            if remote:
+                raise
             panel.error(error)
 
     @QtCore.Slot()
@@ -236,7 +264,10 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         panel = self.snapshotWidget
         panel.captureButton.setEnabled(True)
         if worker.error is not None:
-            panel.error(worker.error)
+            if getattr(worker, "remote", False):
+                panel.statusLabel.setText(worker.error)
+            else:
+                panel.error(worker.error)
         else:
             if os.path.abspath(os.path.expanduser(panel.directoryEdit.text())) == str(worker.path.parent.resolve()):
                 panel.refresh_list(selected=worker.path)
@@ -331,7 +362,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             return
         enabled = self.actionWaterfall.isChecked()
         settings = QtCore.QSettings()
-        size = settings.value("waterfall_history_size", 100, int) if enabled else 1
+        size = settings.value("waterfall_history_size", 100, int) if enabled or self.mobile_server is not None else 1
         if self.persistenceCheckBox.isChecked():
             size = max(size, settings.value("persistence_length", 5, int) + 1)
         self.data_storage.configure_history(size, enabled)
@@ -712,7 +743,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.update_status()
         self.progressbar.setVisible(False)
 
-    def start(self, single_shot=False):
+    def start(self, single_shot=False, remote=False):
         """Start power thread"""
         settings = QtCore.QSettings()
         executable = settings.value("executable", self.backend or "soapy_power")
@@ -723,6 +754,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
                                  "Open File > Settings and select an installed backend "
                                  "and its executable path.".format(executable))
         except ValueError as error:
+            if remote:
+                raise
             QtWidgets.QMessageBox.warning(self, "Cannot start measurement", str(error))
             return
 
@@ -1030,6 +1063,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.snapshotWidget.statusLabel.setText("Finishing snapshot operation before closing…")
             event.ignore()
             return
+        self.stop_mobile_server()
         self.stop()
         if self.analysis_window is not None:
             self.analysis_window.close()

@@ -93,7 +93,7 @@ def read_snapshot(path, metadata_only=False):
         return dict(metadata, curves=curves)
 
 
-def save_snapshot(directory, curves, view_range, screenshot, waterfall=None):
+def save_snapshot(directory, curves, view_range, screenshot, waterfall=None, name=""):
     directory = Path(directory).expanduser()
     if not directory.is_dir():
         raise ValueError('Select an existing snapshot directory')
@@ -104,7 +104,7 @@ def save_snapshot(directory, curves, view_range, screenshot, waterfall=None):
     now = datetime.now().astimezone()
     stem = 'spectrum_{}_{}'.format(now.strftime('%Y%m%d_%H%M%S_%f'), uuid.uuid4().hex[:8])
     data_path, image_path = directory / (stem + '.npz'), directory / (stem + '.png')
-    metadata = dict(format=FORMAT, created=now.isoformat(timespec='milliseconds'),
+    metadata = dict(format=FORMAT, name=name.strip(), created=now.isoformat(timespec='milliseconds'),
                     view_range=view_range, curves=[{'name': c['name'], 'color': c['color']} for c in curves])
     arrays = {'metadata': np.array(json.dumps(metadata))}
     for i, curve in enumerate(curves):
@@ -142,9 +142,9 @@ def save_snapshot(directory, curves, view_range, screenshot, waterfall=None):
 
 class SnapshotSaveThread(QtCore.QThread):
     """Compress and write immutable capture data without blocking Qt events."""
-    def __init__(self, directory, curves, view_range, image, waterfall=None, parent=None):
+    def __init__(self, directory, curves, view_range, image, waterfall=None, parent=None, name=""):
         super().__init__(parent)
-        self.arguments = (directory, curves, view_range, image, waterfall)
+        self.arguments = (directory, curves, view_range, image, waterfall, name)
         self.path = None
         self.error = None
 
