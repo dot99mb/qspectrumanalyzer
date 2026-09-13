@@ -314,3 +314,38 @@ class MobileServerTests(unittest.TestCase):
             self.assertIn('http://192.168.1.117:8766', dialog.addresses.text())
             self.assertNotIn('127.0.0.1', dialog.addresses.text())
             dialog.close()
+
+    def test_spectrum_selection_persists_and_does_not_change_desktop(self):
+        before = [box.isChecked() for box in (self.window.mainCurveCheckBox,
+                  self.window.averageCheckBox, self.window.peakHoldMaxCheckBox, self.window.peakHoldMinCheckBox)]
+        code, _, body = self.request('/api/v1/spectrum/settings', 'POST', payload={'curves': ['main', 'min']})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)['spectrum_curves'], ['main', 'min'])
+        self.assertEqual(QtCore.QSettings().value('mobile/spectrum_curves'), 'main,min')
+        self.assertEqual(before, [box.isChecked() for box in (self.window.mainCurveCheckBox,
+                  self.window.averageCheckBox, self.window.peakHoldMaxCheckBox, self.window.peakHoldMinCheckBox)])
+        self.assertEqual(self.request('/api/v1/spectrum/settings', 'POST', payload={'curves': ['invalid']})[0], 409)
+        self.assertEqual(self.server.spectrum_curves, ['main', 'min'])
+        self.assertEqual(self.request('/api/v1/spectrum/settings', 'POST', payload={'curves': []})[0], 200)
+        self.assertEqual(self.server.spectrum_curves, [])
+
+    def test_renderer_respects_selected_curves_and_waterfall_is_unchanged(self):
+        x = np.arange(1000.)
+        avg = np.full(1000, -90.)
+        peak = np.full(1000, -60.)
+        history = np.stack([avg, peak])
+        lut = np.tile(np.arange(256, dtype=np.uint8)[:, None], (1, 4))
+        selected = render_images(x, avg, peak, history, (0, 1000), (-120, 0), lut,
+                                 curves=[('Main', '#ffff00', peak), ('Min hold', '#6080ff', avg)])
+        blank = render_images(x, avg, peak, history, (0, 1000), (-120, 0), lut, curves=[])
+        self.assertEqual(selected['waterfall'], blank['waterfall'])
+        image = QtGui.QImage.fromData(selected['spectrum'])
+        yellow = blue = 0
+        for y in range(35, 375):
+            for x in range(70, 1004):
+                color = image.pixelColor(x, y)
+                yellow += color.red() == 255 and color.green() == 255 and color.blue() == 0
+                blue += color.red() == 96 and color.green() == 128 and color.blue() == 255
+        self.assertGreater(yellow, 0)
+        self.assertGreater(blue, 0)
+        self.assertNotEqual(selected['spectrum'], blank['spectrum'])

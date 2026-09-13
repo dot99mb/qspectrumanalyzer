@@ -7,6 +7,8 @@ hackrf_sweep, rtl_power, rx_power and other backends)
 Documentation
 -------------
 
+- `Сборка DEB-пакета для Debian 13 (русский)
+  <docs/BUILD_DEB_RU.md>`_
 - `Руководство пользователя: функции и настройки программы
   <docs/USER_GUIDE_RU.md>`_
 - `Установка в Ubuntu 26.04: HackRF, RTL-SDR и PlutoSDR

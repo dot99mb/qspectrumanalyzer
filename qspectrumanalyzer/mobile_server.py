@@ -140,13 +140,15 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
-        if self.path in ('/api/v1/snapshots', '/api/v1/scanning/start', '/api/v1/scanning/frequency'):
+        if self.path in ('/api/v1/snapshots', '/api/v1/scanning/start', '/api/v1/scanning/frequency', '/api/v1/spectrum/settings'):
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if self.headers.get('Transfer-Encoding') or not 0 < length <= 4096:
                     raise ValueError('Invalid request length')
                 payload = json.loads(self.rfile.read(length))
-                if self.path != '/api/v1/snapshots':
+                if self.path == '/api/v1/spectrum/settings':
+                    action = ('spectrum_settings', payload)
+                elif self.path != '/api/v1/snapshots':
                     if not isinstance(payload, dict):
                         raise ValueError('Expected JSON object')
                     action = (self.path.rsplit('/', 1)[1], payload)
@@ -191,7 +193,7 @@ def png_bytes(image):
     return bytes(data)
 
 
-def render_images(x, average, maximum, history, frequency_range, levels, lut, history_size=None):
+def render_images(x, average, maximum, history, frequency_range, levels, lut, history_size=None, curves=None):
     """Paint off the UI thread: spectrum extrema, mean waterfall power per column."""
     width, height = 1024, 420
     left, top, right, bottom = 70, 35, 20, 45
@@ -200,13 +202,21 @@ def render_images(x, average, maximum, history, frequency_range, levels, lut, hi
     edges = np.linspace(0, bins, min(columns, bins) + 1, dtype=int)
     starts = edges[:-1]
     count = len(starts)
+    if curves is None:
+        curves = [('Average', '#00dddd', average), ('Max hold', '#ff6060', maximum)]
     reduced = []
-    for values in (average, maximum):
+    colors = []
+    names = []
+    for name, color, values in curves:
+        if values is None or len(values) != bins:
+            continue
+        names.append(name)
+        colors.append(color)
         values = np.asarray(values)
         low = np.minimum.reduceat(values, starts)
         high = np.maximum.reduceat(values, starts)
         reduced.append((low, high))
-    finite = np.concatenate([v[np.isfinite(v)] for pair in reduced for v in pair])
+    finite = np.concatenate([v[np.isfinite(v)] for pair in reduced for v in pair]) if reduced else np.array([])
     ylow, yhigh = (float(finite.min()), float(finite.max())) if finite.size else (-120., 0.)
     padding = max(2., (yhigh - ylow) * .05)
     ylow -= padding
@@ -233,8 +243,8 @@ def render_images(x, average, maximum, history, frequency_range, levels, lut, hi
         painter.drawText(5, 20, ylabel)
         return image, painter
 
-    spectrum, painter = base('Average (cyan) / Max hold (red)', ylow, yhigh, 'dB')
-    for color, (low, high) in zip(('#00dddd', '#ff6060'), reduced):
+    spectrum, painter = base(' / '.join(names) or 'No curves selected', ylow, yhigh, 'dB')
+    for color, (low, high) in zip(colors, reduced):
         painter.setPen(QtGui.QPen(QtGui.QColor(color), 1))
         polygon = QtGui.QPolygonF()
         for i in range(count):
@@ -277,6 +287,9 @@ class MobileServer(QtCore.QObject):
         self.lock = threading.Lock()
         self.commands = queue.Queue(maxsize=16)
         self.images, self.state = {}, {}
+        saved = QtCore.QSettings().value('mobile/spectrum_curves', 'average,max')
+        self.spectrum_curves = [key for key in str(saved).split(',') if key in ('main', 'average', 'max', 'min')]
+        self.spectrum_revision = 0
         self.snapshot_jobs = {}
         self.snapshot_directory = ""
         self.frame_id = 0
@@ -308,6 +321,7 @@ class MobileServer(QtCore.QObject):
                                    threshold_db=w.recordingWidget.thresholdSpinBox.value(),
                                    separator=w.recordingWidget.delimiterEdit.text(),
                                    message=w.recordingWidget.statusLabel.text()),
+                    spectrum_curves=list(self.spectrum_curves),
                     frame_id=self.frame_id, server_time=time.time(), image_width=1024,
                     image_height=420, max_image_fps=2, image_time=self.image_time,
                     last_data_time=w.prev_data_timestamp,
@@ -366,6 +380,21 @@ class MobileServer(QtCore.QObject):
         except Exception as error:
             return {'error': str(error)}
 
+    def spectrum_settings(self, payload):
+        if not isinstance(payload, dict):
+            return {'error': 'Expected JSON object'}
+        keys = payload.get('curves')
+        if (not isinstance(keys, list) or len(keys) > 4
+                or any(not isinstance(key, str) or key not in ('main', 'average', 'max', 'min') for key in keys)):
+            return {'error': 'Choose main, average, max or min'}
+        self.spectrum_curves = [key for key in ('main', 'average', 'max', 'min') if key in keys]
+        self.spectrum_revision += 1
+        QtCore.QSettings().setValue('mobile/spectrum_curves', ','.join(self.spectrum_curves))
+        with self.lock:
+            self.images.pop('spectrum', None)
+        self.last_render = 0
+        return self.status()
+
     def tick(self):
         while True:
             try:
@@ -375,6 +404,8 @@ class MobileServer(QtCore.QObject):
             if result.set_running_or_notify_cancel():
                 if action == 'scan_stop':
                     result.set_result(self.scanning_command(action))
+                elif isinstance(action, tuple) and action[0] == 'spectrum_settings':
+                    result.set_result(self.spectrum_settings(action[1]))
                 elif isinstance(action, tuple) and action[0] != 'snapshot':
                     result.set_result(self.scanning_command(*action))
                 elif isinstance(action, tuple):
@@ -408,7 +439,7 @@ class MobileServer(QtCore.QObject):
         if self.future is not None and self.future.done():
             try:
                 images = self.future.result()
-                if self.future.source == self.source:
+                if self.future.source == self.source and self.future.revision == self.spectrum_revision:
                     with self.lock:
                         self.images = images
                         self.frame_id += 1
@@ -442,7 +473,13 @@ class MobileServer(QtCore.QObject):
         levels = wf.histogram.getLevels() if wf.enabled and wf.visible_history_size else None
         start = storage.frequency_start if storage.frequency_start is not None else float(x[0])
         stop = storage.frequency_stop if storage.frequency_stop is not None else float(x[-1])
-        self.future = self.executor.submit(render_images, x, avg, maximum, history, (start, stop), levels, lut, wf.history_size)
+        choices = {'main': ('Main', '#ffff00', storage.y),
+                   'average': ('Average', '#00dddd', avg),
+                   'max': ('Max hold', '#ff6060', maximum),
+                   'min': ('Min hold', '#6080ff', storage.peak_hold_min)}
+        curves = [choices[key] for key in self.spectrum_curves]
+        self.future = self.executor.submit(render_images, x, avg, maximum, history, (start, stop), levels, lut, wf.history_size, curves)
+        self.future.revision = self.spectrum_revision
         self.future.source = self.source
         self.last_render = time.monotonic()
 
