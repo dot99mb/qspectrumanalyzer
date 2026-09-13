@@ -72,6 +72,9 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.spectrumPlotWidget.trigger_level_callback = self.set_trigger_levels
         self.create_view_menu()
         self.analysis_window = None
+        self.snapshot_analysis_window = None
+        self.actionAnalyzeSnapshots = self.menu_File.addAction(self.tr("Analyze spectrum snapshots..."))
+        self.actionAnalyzeSnapshots.triggered.connect(self.open_snapshot_analysis)
         self.actionAnalyzeRecording = self.menu_File.addAction(self.tr("Analyze recording..."))
         self.actionAnalyzeRecording.triggered.connect(self.open_recording_analysis)
         self.actionMobileServer = self.menu_File.addAction(self.tr('Mobile server...'))
@@ -135,6 +138,16 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.peak_update_timer = QtCore.QTimer(self)
         self.peak_update_timer.timeout.connect(self.refresh_peak_frequencies_if_dirty)
         self.set_peak_refresh_interval(self.peakListWidget.refreshIntervalSpinBox.value())
+
+    def open_snapshot_analysis(self):
+        from qspectrumanalyzer.snapshot_analysis import SnapshotAnalysisWindow
+        if self.snapshot_analysis_window is None:
+            self.snapshot_analysis_window = SnapshotAnalysisWindow(self)
+            self.snapshot_analysis_window.destroyed.connect(
+                lambda: setattr(self, 'snapshot_analysis_window', None))
+        self.snapshot_analysis_window.show()
+        self.snapshot_analysis_window.raise_()
+        self.snapshot_analysis_window.activateWindow()
 
     def open_recording_analysis(self):
         from qspectrumanalyzer.analysis import RecordingAnalysisWindow
@@ -1067,6 +1080,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.stop()
         if self.analysis_window is not None:
             self.analysis_window.close()
+        if self.snapshot_analysis_window is not None:
+            self.snapshot_analysis_window.close()
         self.recordingWidget.stop_recording()
         self.recordingWidget.save_settings()
         self.save_settings()
