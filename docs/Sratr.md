@@ -6,6 +6,14 @@ cd /home/dock/venv/qspectr/qspectrumanalyzer
 QT_PREFERRED_BINDING=PyQt5 PYQTGRAPH_QT_LIB=PyQt5 qspectrumanalyzer
 ```
 
+На Дебиан
+
+```
+cd /home/dock/dev/qspectr/qspectrumanalyzer
+source /home/dock/dev/qspectr/bin/activate
+python -m qspectrumanalyzer
+```
+
 ## Ярлык
 
 путь

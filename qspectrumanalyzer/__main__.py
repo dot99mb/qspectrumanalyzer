@@ -402,6 +402,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         for dock in self.dock_widgets:
             if dock is not self.levelsDockWidget or self.actionWaterfall.isChecked():
                 dock.show()
+        QtCore.QTimer.singleShot(0, self.ensure_window_visible)
 
     def update_history_retention(self):
         if self.data_storage is None:
@@ -661,20 +662,85 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         QtCore.QTimer.singleShot(0, self.fit_frequency_range)
         QtCore.QTimer.singleShot(0, self.ensure_window_visible)
 
+    def fit_docks_to_screen(self, available_size):
+        """Keep oversized restored dock layouts usable on smaller screens."""
+        self.layout().activate()
+        minimum = self.minimumSizeHint()
+        if (minimum.width() <= available_size.width()
+                and minimum.height() <= available_size.height()):
+            return
+
+        # A resize alone cannot override the minimum size of stacked docks.
+        # Scroll their contents so every control remains reachable, then put
+        # secondary panels in one tab group. Floating/hidden panels stay put.
+        docked = [dock for dock in self.dock_widgets
+                  if not dock.isFloating() and not dock.isHidden()]
+        for dock in docked:
+            if not isinstance(dock.widget(), QtWidgets.QScrollArea):
+                content = dock.widget()
+                scroll = QtWidgets.QScrollArea(dock)
+                scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+                scroll.setWidgetResizable(True)
+                scroll.setWidget(content)
+                dock.setWidget(scroll)
+                dock.setMinimumSize(0, 0)
+
+        secondary = [dock for dock in docked
+                     if dock not in (self.controlsDockWidget, self.frequencyDockWidget)]
+        primary = [dock for dock in (self.controlsDockWidget, self.frequencyDockWidget)
+                   if dock in docked]
+        for dock in docked:
+            self.removeDockWidget(dock)
+        for dock in primary:
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        if secondary:
+            anchor = secondary[0]
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, anchor)
+            for dock in secondary[1:]:
+                self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+                self.tabifyDockWidget(anchor, dock)
+        for dock in docked:
+            dock.show()
+        if secondary:
+            anchor.raise_()
+        # Long panel titles must not impose the combined width of all tabs.
+        for tabs in self.findChildren(QtWidgets.QTabBar):
+            tabs.setExpanding(False)
+            tabs.setUsesScrollButtons(True)
+            tabs.setElideMode(QtCore.Qt.ElideRight)
+        self.layout().invalidate()
+        self.layout().activate()
+        if docked:
+            self.resizeDocks([docked[0]], [min(360, available_size.width() // 2)],
+                             QtCore.Qt.Horizontal)
+        if primary:
+            heights = [dock.widget().widget().minimumSizeHint().height() + 30
+                       for dock in primary]
+            self.resizeDocks(primary, heights, QtCore.Qt.Vertical)
+
     def ensure_window_visible(self):
         """Restore an accessible window even after screen/layout changes."""
         if self.isMinimized():
             self.showNormal()
         screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return
         available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra_width = max(0, frame.width() - self.width())
+        extra_height = max(0, frame.height() - self.height())
+        client_size = QtCore.QSize(max(1, available.width() - extra_width),
+                                  max(1, available.height() - extra_height))
+        # Also relax layout constraints for maximized/full-screen windows;
+        # the window manager remains responsible for their geometry.
+        self.fit_docks_to_screen(client_size)
         if not self.isMaximized() and not self.isFullScreen():
             frame = self.frameGeometry()
             if not available.contains(frame):
-                extra_width = frame.width() - self.width()
-                extra_height = frame.height() - self.height()
-                self.resize(min(self.width(), available.width() - extra_width),
-                            min(self.height(), available.height() - extra_height))
-                self.move(available.topLeft())
+                self.resize(self.size().boundedTo(client_size))
+                frame = self.frameGeometry()
+                self.move(max(available.left(), min(frame.left(), available.right() - frame.width() + 1)),
+                          max(available.top(), min(frame.top(), available.bottom() - frame.height() + 1)))
         self.raise_()
         self.activateWindow()
 
