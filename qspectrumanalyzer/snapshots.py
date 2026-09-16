@@ -65,7 +65,13 @@ def read_snapshot(path, metadata_only=False):
                 raise ValueError('Invalid waterfall data dimensions')
             if history.dtype.kind not in 'fiu' or lut.ndim != 2 or lut.shape[1] not in (3, 4) or lut.dtype != np.uint8:
                 raise ValueError('Invalid waterfall image data')
-            return dict(metadata, frequencies=x, history=history, lut=lut)
+            result = dict(metadata, frequencies=x, history=history, lut=lut)
+            if 'timestamps' in archive:
+                timestamps = archive['timestamps']
+                if timestamps.shape != (len(history), 2) or not np.isfinite(timestamps).all():
+                    raise ValueError('Invalid waterfall timestamps')
+                result['timestamps'] = timestamps
+            return result
         if not isinstance(metadata['created'], str) or not isinstance(metadata['curves'], list) or not metadata['curves']:
             raise ValueError('Invalid snapshot metadata')
         datetime.fromisoformat(metadata['created'])
@@ -114,6 +120,9 @@ def save_snapshot(directory, curves, view_range, screenshot, waterfall=None, nam
         metadata.update(kind='waterfall', frequency_range=waterfall['frequency_range'],
                         levels=waterfall['levels'])
         arrays.update(frequencies=waterfall['frequencies'], history=waterfall['history'], lut=waterfall['lut'])
+        if 'timestamps' in waterfall:
+            arrays['timestamps'] = np.asarray(waterfall['timestamps'], dtype=float)
+            metadata['time_columns'] = ['unix_seconds', 'monotonic_seconds']
         arrays['metadata'] = np.array(json.dumps(metadata))
     temporary_paths = []
     published_image = False

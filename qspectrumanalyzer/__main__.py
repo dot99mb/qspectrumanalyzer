@@ -7,6 +7,8 @@ import shutil
 
 from Qt import QtCore, QtGui, QtWidgets
 import numpy as np
+import pyqtgraph as pg
+from qspectrumanalyzer.signal_detection import SignalDetectionWidget
 
 from qspectrumanalyzer import backends
 from qspectrumanalyzer.version import __version__
@@ -69,6 +71,17 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.create_peaks_dock()
         self.create_recording_dock()
         self.create_snapshots_dock()
+        self.newSignalsDock = QtWidgets.QDockWidget('Новые устойчивые сигналы', self)
+        self.newSignalsDock.setObjectName('newSignalsDock')
+        self.newSignalsWidget = SignalDetectionWidget(self)
+        self.newSignalsDock.setWidget(self.newSignalsWidget)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.newSignalsDock)
+        self.tabifyDockWidget(self.snapshotsDockWidget, self.newSignalsDock)
+        self.newSignalsDock.hide()
+        self.signal_regions = []
+        self.newSignalsWidget.start_requested.connect(self.start_signal_detection)
+        self.newSignalsWidget.stop_requested.connect(lambda: self.data_storage.configure_detection())
+        self.newSignalsWidget.bands_changed.connect(self.display_detected_bands)
         self.spectrumPlotWidget.trigger_level_callback = self.set_trigger_levels
         self.create_view_menu()
         self.analysis_window = None
@@ -94,6 +107,25 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
 
         self.update_buttons()
         self.load_settings()
+
+    def start_signal_detection(self, config):
+        self.newSignalsWidget.status.setText('Фиксация фона…')
+        self.data_storage.configure_detection(config)
+
+    def display_detected_bands(self, bands):
+        for plot, region in self.signal_regions:
+            plot.removeItem(region)
+        self.signal_regions = []
+        for low, high in bands:
+            for plot in (self.spectrumPlotWidget.plot, self.waterfallPlotWidget.plot):
+                if plot is self.waterfallPlotWidget.plot and not self.actionWaterfall.isChecked():
+                    continue
+                region = pg.LinearRegionItem((low, high), movable=False,
+                                              brush=pg.mkBrush(0, 255, 80, 35),
+                                              pen=pg.mkPen(0, 255, 80, 150))
+                region.setZValue(900)
+                plot.addItem(region, ignoreBounds=True)
+                self.signal_regions.append((plot, region))
 
     def open_mobile_server(self):
         dialog = MobileServerDialog(self)
@@ -348,6 +380,7 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
             self.peaksDockWidget,
             self.recordingDockWidget,
             self.snapshotsDockWidget,
+            self.newSignalsDock,
         )
         for dock in self.dock_widgets:
             dock.setFeatures(dock.features() | QtWidgets.QDockWidget.DockWidgetClosable)
@@ -477,6 +510,8 @@ class QSpectrumAnalyzerMainWindow(QtWidgets.QMainWindow, Ui_QSpectrumAnalyzerMai
         self.data_storage.history_resized.connect(self.history_retention_updated)
         self.update_history_retention()
         self.data_storage.recording_frame_ready.connect(self.recordingWidget.record_frame)
+        self.data_storage.detection_updated.connect(self.newSignalsWidget.result)
+        self.newSignalsWidget.result(('Накопите фон: минимум три прохода водопада. Затем зафиксируйте его.', [], False))
         self.data_storage.data_updated.connect(self.update_data)
         self.data_storage.data_updated.connect(self.spectrumPlotWidget.update_plot)
         self.data_storage.data_updated.connect(self.spectrumPlotWidget.update_persistence)

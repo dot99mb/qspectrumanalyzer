@@ -420,6 +420,7 @@ class WaterfallPlotWidget:
             levels = [float(np.nanmin(image.image)), float(np.nanmax(image.image))]
         lut = self.histogram.getLookupTable(n=256, alpha=True)
         return dict(frequencies=self.image_frequencies.copy(), history=image.image.T.copy(),
+                    timestamps=self.image_timestamps.copy(),
                     frequency_range=list(self.image_frequency_range),
                     levels=np.asarray(levels).tolist(), lut=np.array(lut, dtype=np.uint8, copy=True))
 
@@ -582,12 +583,13 @@ class WaterfallPlotWidget:
         if not self.enabled or data_storage.x is None or data_storage.history is None:
             return
 
-        history = data_storage.history.get_buffer()
+        history, timestamps = data_storage.history.timed_frame
         if not len(history):
             return
 
         visible_size = min(len(history), self.history_size)
         history = history[-visible_size:]
+        self.image_timestamps = timestamps[-visible_size:].copy()
         x = np.asarray(data_storage.x)
         bins = min(history.shape[1], len(x))
         if bins < 1:

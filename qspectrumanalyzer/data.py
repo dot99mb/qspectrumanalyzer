@@ -15,15 +15,20 @@ class HistoryBuffer:
         self.history_size = 0
         self.counter = 0
         self.buffer = np.empty(shape=(max_history_size, data_size), dtype=dtype)
+        self.times = np.full((max_history_size, 2), np.nan)
+        self.timed_frame = (self.buffer[:0], self.times[:0])
 
-    def append(self, data):
+    def append(self, data, wall_time=np.nan, monotonic_time=np.nan):
         """Append new data to ring buffer"""
         self.counter += 1
         if self.history_size < self.max_history_size:
             self.history_size += 1
         if self.max_history_size > 1:
             self.buffer = np.roll(self.buffer, -1, axis=0)
+            self.times = np.roll(self.times, -1, axis=0)
         self.buffer[-1] = data
+        self.times[-1] = (wall_time, monotonic_time)
+        self.timed_frame = (self.buffer[-self.history_size:], self.times[-self.history_size:])
 
     def get_buffer(self):
         """Return buffer stripped to size of actual data"""
@@ -59,6 +64,7 @@ class Task(QtCore.QRunnable):
 
 class DataStorage(QtCore.QObject):
     """Data storage for spectrum measurements"""
+    detection_updated = QtCore.Signal(object)
     history_updated = QtCore.Signal(object)
     history_resized = QtCore.Signal(object)
     data_updated = QtCore.Signal(object)
@@ -97,6 +103,9 @@ class DataStorage(QtCore.QObject):
         self.wait()
         self.x = None
         self.history = None
+        self.detector = None
+        self.detection_last_emit = 0.
+        self.detection_updated.emit(("Сканирование сброшено. Зафиксируйте фон заново.", [], False))
         self.reset_data()
 
     def reset_data(self):
@@ -138,6 +147,8 @@ class DataStorage(QtCore.QObject):
             resized.counter = old.counter
             if len(recent):
                 resized.buffer[-len(recent):] = recent
+                resized.times[-len(recent):] = old.times[-old.history_size:][-size:]
+                resized.timed_frame = (resized.buffer[-len(recent):], resized.times[-len(recent):])
             # Recalculation can leave the current spectrum referencing history.
             if self.y is not None and np.shares_memory(self.y, old.buffer):
                 self.y = self.y.copy()
@@ -217,12 +228,40 @@ class DataStorage(QtCore.QObject):
         self.start_task(self.update_peak_hold_max, data)
         self.start_task(self.update_peak_hold_min, data)
 
+    def configure_detection(self, config=None):
+        self.start_task(self._configure_detection, config)
+
+    def _configure_detection(self, config):
+        self.detector = None
+        if config is None:
+            self.detection_updated.emit(("Анализ остановлен. Для продолжения зафиксируйте фон.", [], False))
+            return
+        try:
+            from .signal_detection import SignalDetector
+            if self.history is None or self.x is None:
+                raise ValueError('Нет истории водопада. Запустите сканирование.')
+            history = self.history.get_buffer()[-64:]
+            self.detector = SignalDetector(self.x, history, **config)
+            self.detection_updated.emit(("Фон зафиксирован по {} проходам. Ожидание новых сигналов.".format(len(history)), [], True))
+        except Exception as error:
+            self.detection_updated.emit((str(error), [], False))
+
     def update_history(self, data):
         """Update spectrum measurements history"""
         if self.history is None:
             self.history = HistoryBuffer(len(data["y"]), self.max_history_size)
 
-        self.history.append(data["y"])
+        wall, mono = data["recording_time"]
+        self.history.append(data["y"], wall, mono)
+        if self.detector is not None:
+            try:
+                rows = self.detector.update(data["x"], data["y"], wall, mono)
+                if mono - self.detection_last_emit >= .5:
+                    self.detection_last_emit = mono
+                    self.detection_updated.emit(("Фон зафиксирован. Подтверждённых событий: {}.".format(len(rows)), rows, True))
+            except Exception as error:
+                self.detector = None
+                self.detection_updated.emit((str(error), [], False))
         if self.emit_history_updates:
             self.history_updated.emit(self)
 
@@ -303,6 +342,8 @@ class DataStorage(QtCore.QObject):
         if self.history is None:
             return
 
+        if self.detector is not None:
+            self._configure_detection(None)
         history = self.history.get_buffer()
         if self.prev_baseline is not None and len(history[-1]) == len(self.prev_baseline):
             history += self.prev_baseline
